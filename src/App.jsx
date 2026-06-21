@@ -1,824 +1,1576 @@
 // npm install lucide-react recharts firebase
+import React, { useState, useEffect, useRef, useCallback } from "react";
+import {
+  Check,
+  X,
+  Home,
+  ChevronRight,
+  RefreshCw,
+  BarChart2,
+  BookOpen,
+  User,
+  ArrowRight,
+  HelpCircle,
+} from "lucide-react";
+import {
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  Tooltip,
+  Cell,
+  ResponsiveContainer,
+} from "recharts";
+import { initializeApp } from "firebase/app";
+import { getAuth, signInAnonymously } from "firebase/auth";
+import { getFirestore, doc, setDoc, onSnapshot } from "firebase/firestore";
 
-import React, { useState, useEffect } from 'react';
-import { Check, X, Home, ChevronRight, BookOpen, Clock, AlertCircle, BarChart2, LogOut, Play, RotateCcw } from 'lucide-react';
-import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip as RechartsTooltip } from 'recharts';
-import { initializeApp } from 'firebase/app';
-import { getFirestore, doc, setDoc, getDoc } from 'firebase/firestore';
-
-// ==========================================
-// Firebase Configuration (ダミー値。本番環境の値に書き換えてください)
-// ==========================================
+// ===================================================================
+// Firebase設定（APIキー等は環境変数から読み込み。直書きは絶対に厳禁）
+// ===================================================================
 const firebaseConfig = {
-  apiKey: "AIzaSyCyo4bAZwqaN2V0g91DehS6mHmjZD5XJTc",
-  authDomain: "sabu-hide-web-app.firebaseapp.com",
-  projectId: "sabu-hide-web-app",
-  storageBucket: "sabu-hide-web-app.firebasestorage.app",
-  messagingSenderId: "145944786114",
-  appId: "1:145944786114:web:0da0c2d87a9e24ca6cf75b",
-  measurementId: "G-XSS72H1ZKV"
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
+  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
+  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
+  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
+  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
+  appId: import.meta.env.VITE_FIREBASE_APP_ID,
 };
 
-// Firebase初期化 (try-catchでエラー回避)
-let db;
+// データ分離用のアプリ識別子（他問題集と混ざらないよう。後から一括書き換え可）
+const APP_ID = "QuizApp_3_6_Production_Operation_001";
+
+const SOURCE_LABEL = "過去問セレクト演習 3-6 生産のオペレーション";
+const APP_TITLE = "3-6 生産のオペレーション";
+const SECTION_BADGE = "過去問 3-6";
+
+// Firebase初期化（多重初期化・設定欠如でもクラッシュしないよう防衛的に）
+let app = null;
+let auth = null;
+let db = null;
 try {
-  const app = initializeApp(firebaseConfig);
-  db = getFirestore(app);
-} catch (error) {
-  console.error("Firebase initialization error:", error);
+  if (firebaseConfig.apiKey) {
+    app = initializeApp(firebaseConfig);
+    auth = getAuth(app);
+    db = getFirestore(app);
+  } else {
+    console.warn("[Firebase] 設定が未定義のため、LocalStorageフォールバックで動作します。");
+  }
+} catch (e) {
+  console.warn("[Firebase] 初期化に失敗しました。LocalStorageフォールバックで動作します。", e);
 }
 
-// アプリ固有のID（他のアプリとデータが混ざらないようにするため）
-const APP_ID = "past-exam-4-6";
+const CHOICE_LABELS = ["ア", "イ", "ウ", "エ", "オ"];
 
-// ==========================================
-// 問題集データ
-// ==========================================
-const quizData = [
+const CAT_LABEL = {
+  quality: "品質管理（QC）",
+  equipment: "設備管理・保全",
+  info: "生産情報システム",
+};
+
+// ===================================================================
+// インラインSVG / テーブル図表コンポーネント群（外部画像URLは一切使用しない）
+// すべて<svg>プリミティブ等で100%内製化し、与条件のラベル・数値を
+// 1つも省略せずにマッピングする。
+// ===================================================================
+
+// 共通：白背景カードに図/SVGを描画（ダークテーマ上で見やすく）
+const FigCard = ({ children, caption }) => (
+  <div className="my-4">
+    <div className="rounded-xl bg-white p-3 shadow-lg overflow-x-auto">{children}</div>
+    {caption && <p className="mt-1 text-center text-xs text-slate-400">{caption}</p>}
+  </div>
+);
+
+// SVG用：複数行テキストを描画するヘルパー
+const MultiText = ({ x, y, lines, lineH = 15, fontSize = 12, fill = "#1e293b", fontWeight = "normal", anchor = "middle" }) => (
+  <text x={x} y={y} textAnchor={anchor} fontSize={fontSize} fill={fill} fontWeight={fontWeight}>
+    {lines.map((ln, i) => (
+      <tspan key={i} x={x} dy={i === 0 ? 0 : lineH}>
+        {ln}
+      </tspan>
+    ))}
+  </text>
+);
+
+// 共通の矢印マーカー定義
+const ArrowDefs = ({ id = "arw", color = "#334155" }) => (
+  <defs>
+    <marker id={id} markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill={color} />
+    </marker>
+  </defs>
+);
+
+// --- ◆管理図（QC7つ道具） ---
+const ControlChart = () => {
+  const pts = [
+    [200, 120], [225, 200], [250, 150], [275, 180], [300, 140], [325, 195],
+    [350, 150], [375, 130], [400, 150], [425, 110], [450, 70], [475, 110],
+    [500, 95], [525, 200], [545, 170],
+  ];
+  const path = pts.map((p) => p.join(",")).join(" ");
+  return (
+    <FigCard caption="図：管理図（観測した個々のデータを時系列で表す）">
+      <svg viewBox="0 0 600 300" className="w-full" style={{ maxHeight: 300 }}>
+        <text x="300" y="24" textAnchor="middle" fontSize="17" fill="#0f172a" fontWeight="bold">◆管理図</text>
+        {/* 軸 */}
+        <line x1="180" y1="40" x2="180" y2="265" stroke="#0f172a" strokeWidth="2" markerEnd="url(#ccArw)" />
+        <line x1="180" y1="265" x2="575" y2="265" stroke="#0f172a" strokeWidth="2" markerEnd="url(#ccArw)" />
+        <ArrowDefs id="ccArw" color="#0f172a" />
+        {/* 管理限界線・中心線 */}
+        <line x1="180" y1="80" x2="565" y2="80" stroke="#dc2626" strokeWidth="1.5" strokeDasharray="4 4" />
+        <line x1="180" y1="160" x2="565" y2="160" stroke="#1d4ed8" strokeWidth="1.5" strokeDasharray="4 4" />
+        <line x1="180" y1="240" x2="565" y2="240" stroke="#dc2626" strokeWidth="1.5" strokeDasharray="4 4" />
+        <text x="172" y="84" textAnchor="end" fontSize="11" fill="#dc2626" fontWeight="bold">上方管理限界線</text>
+        <text x="172" y="164" textAnchor="end" fontSize="11" fill="#1d4ed8" fontWeight="bold">中心線</text>
+        <text x="172" y="244" textAnchor="end" fontSize="11" fill="#dc2626" fontWeight="bold">下方管理限界線</text>
+        {/* データ折れ線 */}
+        <polyline points={path} fill="none" stroke="#334155" strokeWidth="2" />
+        {/* 異常値 */}
+        <rect x="470" y="40" width="80" height="26" rx="4" fill="#dc2626" />
+        <text x="510" y="58" textAnchor="middle" fontSize="13" fill="#ffffff" fontWeight="bold">異常値</text>
+        <line x1="470" y1="55" x2="450" y2="70" stroke="#0f172a" strokeWidth="1.5" markerEnd="url(#ccArw)" />
+        <text x="560" y="288" textAnchor="end" fontSize="13" fill="#0f172a" fontWeight="bold">時間</text>
+      </svg>
+    </FigCard>
+  );
+};
+
+// --- ◆特性要因図（フィッシュボーン） ---
+const FishboneChart = () => {
+  const Big = ({ x, y }) => {
+    const nx = Number(x);
+    const ny = Number(y);
+    return (
+      <g>
+        <rect x={nx} y={ny} width="86" height="34" rx="3" fill="#dbeafe" stroke="#1e3a8a" strokeWidth="1.2" />
+        <text x={nx + 43} y={ny + 22} textAnchor="middle" fontSize="13" fill="#1e293b" fontWeight="bold">要因(大)</text>
+      </g>
+    );
+  };
+  return (
+    <FigCard caption="図：特性要因図（原因と結果を魚の骨のように整理する）">
+      <svg viewBox="0 0 620 320" className="w-full" style={{ maxHeight: 320 }}>
+        <text x="310" y="24" textAnchor="middle" fontSize="17" fill="#0f172a" fontWeight="bold">◆特性要因図</text>
+        <ArrowDefs id="fbArw" color="#0f172a" />
+        {/* 背骨 */}
+        <line x1="30" y1="170" x2="500" y2="170" stroke="#0f172a" strokeWidth="2.5" markerEnd="url(#fbArw)" />
+        {/* 特性 */}
+        <rect x="508" y="148" width="92" height="44" rx="3" fill="#fde6d3" stroke="#9a3412" strokeWidth="1.5" />
+        <text x="554" y="176" textAnchor="middle" fontSize="15" fill="#1e293b" fontWeight="bold">特性</text>
+        {/* 大骨（左右×上下） */}
+        <line x1="230" y1="170" x2="160" y2="78" stroke="#0f172a" strokeWidth="2" />
+        <line x1="230" y1="170" x2="160" y2="262" stroke="#0f172a" strokeWidth="2" />
+        <line x1="410" y1="170" x2="340" y2="78" stroke="#0f172a" strokeWidth="2" />
+        <line x1="410" y1="170" x2="340" y2="262" stroke="#0f172a" strokeWidth="2" />
+        <Big x="117" y="44" />
+        <Big x="117" y="262" />
+        <Big x="297" y="44" />
+        <Big x="297" y="262" />
+        {/* 小骨ラベル */}
+        <text x="205" y="120" textAnchor="middle" fontSize="11" fill="#334155">要因(小)</text>
+        <text x="205" y="228" textAnchor="middle" fontSize="11" fill="#334155">要因(小)</text>
+        <text x="385" y="120" textAnchor="middle" fontSize="11" fill="#334155">要因(小)</text>
+        <text x="385" y="228" textAnchor="middle" fontSize="11" fill="#334155">要因(小)</text>
+      </svg>
+    </FigCard>
+  );
+};
+
+// --- ◆パレート図 ---
+const ParetoChart = () => {
+  const bars = [60, 40, 28, 20, 14, 10, 7, 5, 3, 2];
+  const total = bars.reduce((a, b) => a + b, 0);
+  const labels = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J"];
+  const baseY = 300;
+  const topY = 60;
+  const x0 = 80;
+  const bw = 34;
+  const maxBar = bars[0];
+  let cum = 0;
+  const cumPts = bars.map((v, i) => {
+    cum += v;
+    const cx = x0 + i * bw + bw / 2;
+    const cy = baseY - (cum / total) * (baseY - topY);
+    return [cx, cy];
+  });
+  return (
+    <FigCard caption="図：パレート図（出現頻度の高い順／降順に並べ累積和を表す）">
+      <svg viewBox="0 0 520 350" className="w-full" style={{ maxHeight: 350 }}>
+        <text x="260" y="24" textAnchor="middle" fontSize="17" fill="#0f172a" fontWeight="bold">◆パレート図</text>
+        <ArrowDefs id="ptArw" color="#0f172a" />
+        {/* 軸 */}
+        <line x1="80" y1="50" x2="80" y2={baseY} stroke="#0f172a" strokeWidth="2" markerEnd="url(#ptArw)" />
+        <line x1="80" y1={baseY} x2="500" y2={baseY} stroke="#0f172a" strokeWidth="2" markerEnd="url(#ptArw)" />
+        {/* 100%補助線 */}
+        <line x1="80" y1={topY} x2="470" y2={topY} stroke="#1d4ed8" strokeWidth="1.2" strokeDasharray="3 3" />
+        <text x="72" y={topY + 4} textAnchor="end" fontSize="12" fill="#1d4ed8" fontWeight="bold">100%</text>
+        <text x="72" y={baseY + 4} textAnchor="end" fontSize="12" fill="#1d4ed8" fontWeight="bold">0%</text>
+        {/* 棒 */}
+        {bars.map((v, i) => {
+          const h = (v / maxBar) * (baseY - 90);
+          const bx = x0 + i * bw;
+          return (
+            <g key={i}>
+              <rect x={bx} y={baseY - h} width={bw - 4} height={h} fill="#fef3c7" stroke="#92400e" strokeWidth="1" />
+              <text x={bx + (bw - 4) / 2} y={baseY + 16} textAnchor="middle" fontSize="11" fill="#1d4ed8">{labels[i]}</text>
+            </g>
+          );
+        })}
+        {/* 累積曲線 */}
+        <polyline points={cumPts.map((p) => p.join(",")).join(" ")} fill="none" stroke="#dc2626" strokeWidth="2.5" />
+        {/* 右端から100%へ点線 */}
+        <line x1={cumPts[cumPts.length - 1][0]} y1={topY} x2={cumPts[cumPts.length - 1][0]} y2={baseY} stroke="#1d4ed8" strokeWidth="1" strokeDasharray="3 3" />
+        <text x="498" y={baseY + 24} textAnchor="end" fontSize="13" fill="#0f172a" fontWeight="bold">項目</text>
+      </svg>
+    </FigCard>
+  );
+};
+
+// --- ◆ヒストグラム（時系列データを棒グラフで表す例） ---
+const Histogram = () => {
+  const heights = [2, 5, 8, 11, 14, 17, 13, 9, 5, 3, 1];
+  const labels = [50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60];
+  const baseY = 280;
+  const x0 = 70;
+  const bw = 38;
+  const maxH = 17;
+  return (
+    <FigCard caption="図：ヒストグラム（棒グラフ／度数分布）">
+      <svg viewBox="0 0 520 320" className="w-full" style={{ maxHeight: 320 }}>
+        <text x="260" y="24" textAnchor="middle" fontSize="17" fill="#0f172a" fontWeight="bold">◆ヒストグラム</text>
+        <ArrowDefs id="hgArw" color="#0f172a" />
+        <line x1="70" y1="50" x2="70" y2={baseY} stroke="#0f172a" strokeWidth="2" markerEnd="url(#hgArw)" />
+        <line x1="70" y1={baseY} x2="500" y2={baseY} stroke="#0f172a" strokeWidth="2" markerEnd="url(#hgArw)" />
+        <text x="58" y="46" textAnchor="end" fontSize="12" fill="#0f172a" fontWeight="bold">度数</text>
+        {heights.map((v, i) => {
+          const h = (v / maxH) * (baseY - 70);
+          const bx = x0 + i * bw;
+          return (
+            <g key={i}>
+              <rect x={bx} y={baseY - h} width={bw} height={h} fill="#fef3c7" stroke="#92400e" strokeWidth="1" />
+              <text x={bx + bw / 2} y={baseY + 16} textAnchor="middle" fontSize="11" fill="#1e293b">{labels[i]}</text>
+            </g>
+          );
+        })}
+        <text x="498" y={baseY + 16} textAnchor="end" fontSize="13" fill="#0f172a" fontWeight="bold">重量</text>
+      </svg>
+    </FigCard>
+  );
+};
+
+// --- ◆散布図 ---
+const ScatterChart = () => {
+  const dots = [
+    [120, 180], [150, 160], [170, 200], [185, 150], [200, 175],
+    [210, 130], [225, 165], [240, 145], [255, 120], [265, 150],
+    [280, 110], [295, 135], [310, 100], [320, 125], [180, 195], [250, 185],
+  ];
+  return (
+    <FigCard caption="図：散布図（2つの特性の相関を点でプロット／正の相関）">
+      <svg viewBox="0 0 380 260" className="w-full" style={{ maxHeight: 260 }}>
+        <text x="190" y="22" textAnchor="middle" fontSize="16" fill="#0f172a" fontWeight="bold">◆散布図</text>
+        <ArrowDefs id="scArw" color="#0f172a" />
+        <line x1="50" y1="40" x2="50" y2="225" stroke="#0f172a" strokeWidth="2" markerEnd="url(#scArw)" />
+        <line x1="50" y1="225" x2="360" y2="225" stroke="#0f172a" strokeWidth="2" markerEnd="url(#scArw)" />
+        <text x="40" y="42" textAnchor="end" fontSize="13" fill="#0f172a" fontWeight="bold">Y</text>
+        <text x="358" y="245" textAnchor="end" fontSize="13" fill="#0f172a" fontWeight="bold">X</text>
+        <ellipse cx="220" cy="150" rx="130" ry="42" fill="none" stroke="#1d4ed8" strokeWidth="1.5" strokeDasharray="3 4" transform="rotate(-28 220 150)" />
+        {dots.map((d, i) => (
+          <circle key={i} cx={d[0]} cy={d[1]} r="5" fill="#dc2626" />
+        ))}
+        <text x="300" y="205" textAnchor="middle" fontSize="12" fill="#1d4ed8" fontWeight="bold">正の相関</text>
+      </svg>
+    </FigCard>
+  );
+};
+
+// --- 保全活動の体系図（維持活動／改善活動） ---
+const MaintenanceTree = () => {
+  const Box = ({ x, y, w, label, color = "#1e293b", bg = "#ffffff", stroke = "#334155" }) => {
+    const nx = Number(x);
+    const ny = Number(y);
+    const nw = Number(w);
+    return (
+      <g>
+        <rect x={nx} y={ny} width={nw} height="40" rx="3" fill={bg} stroke={stroke} strokeWidth="1.5" />
+        <text x={nx + nw / 2} y={ny + 26} textAnchor="middle" fontSize="15" fill={color} fontWeight="bold">{label}</text>
+      </g>
+    );
+  };
+  return (
+    <FigCard caption="図：保全活動の体系（維持する活動／改善する活動）">
+      <svg viewBox="0 0 620 340" className="w-full" style={{ maxHeight: 340 }}>
+        <text x="310" y="24" textAnchor="middle" fontSize="16" fill="#0f172a" fontWeight="bold">◆保全活動</text>
+        {/* レベル1 */}
+        <Box x="20" y="150" w="120" label="保全活動" />
+        {/* レベル2 */}
+        <Box x="250" y="90" w="120" label="維持活動" />
+        <Box x="250" y="210" w="120" label="改善活動" />
+        {/* レベル3（赤文字） */}
+        <Box x="460" y="50" w="140" label="予防保全" color="#dc2626" />
+        <Box x="460" y="130" w="140" label="事後保全" color="#dc2626" />
+        <Box x="460" y="210" w="140" label="改良保全" color="#dc2626" />
+        <Box x="460" y="290" w="140" label="保全予防" color="#dc2626" />
+        {/* コネクタ：保全活動→維持/改善 */}
+        <path d="M140 170 H195 V110 H250" fill="none" stroke="#334155" strokeWidth="1.8" />
+        <path d="M195 170 V230 H250" fill="none" stroke="#334155" strokeWidth="1.8" />
+        {/* 維持活動→予防/事後 */}
+        <path d="M370 110 H420 V70 H460" fill="none" stroke="#334155" strokeWidth="1.8" />
+        <path d="M420 110 V150 H460" fill="none" stroke="#334155" strokeWidth="1.8" />
+        {/* 改善活動→改良/保全予防 */}
+        <path d="M370 230 H420 V230 H460" fill="none" stroke="#334155" strokeWidth="1.8" />
+        <path d="M420 230 V310 H460" fill="none" stroke="#334155" strokeWidth="1.8" />
+      </svg>
+    </FigCard>
+  );
+};
+
+// --- 問題6：設備A・Bの稼働／故障修復の調査結果（与条件・ニュートラル） ---
+const EquipmentGantt = () => {
+  const x = (t) => 70 + t * (660 / 240);
+  const ticks = [];
+  for (let t = 0; t <= 240; t += 10) ticks.push(t);
+  const A = [
+    ["稼働", 0, 40], ["修復", 40, 70], ["稼働", 70, 120], ["修復", 120, 130],
+    ["稼働", 130, 180], ["修復", 180, 200], ["稼働", 200, 240],
+  ];
+  const B = [
+    ["稼働", 0, 20], ["修復", 20, 30], ["稼働", 30, 80], ["修復", 80, 90],
+    ["稼働", 90, 180], ["修復", 180, 200], ["稼働", 200, 240],
+  ];
+  const Row = ({ data, y }) =>
+    data.map(([type, s, e], i) => {
+      const w = x(e) - x(s);
+      const fill = type === "修復" ? "#9ca3af" : "#ffffff";
+      return (
+        <g key={i}>
+          <rect x={x(s)} y={y} width={w} height="30" fill={fill} stroke="#334155" strokeWidth="1" />
+          {w > 26 && (
+            <text x={(x(s) + x(e)) / 2} y={y + 20} textAnchor="middle" fontSize="11" fill="#0f172a">{type}</text>
+          )}
+        </g>
+      );
+    });
+  return (
+    <FigCard caption="図：設備A・Bを240時間利用したときの稼働および故障修復の調査結果">
+      <svg viewBox="0 0 760 200" className="w-full" style={{ maxHeight: 200 }}>
+        {/* 目盛 */}
+        {ticks.map((t, i) => (
+          <g key={i}>
+            <line x1={x(t)} y1="44" x2={x(t)} y2="48" stroke="#64748b" strokeWidth="1" />
+            <text x={x(t)} y="38" textAnchor="middle" fontSize="9" fill="#334155">{t}</text>
+          </g>
+        ))}
+        {/* 設備A */}
+        <text x="10" y="74" fontSize="13" fill="#0f172a" fontWeight="bold">設備A</text>
+        <Row data={A} y="55" />
+        {/* 設備B */}
+        <text x="10" y="124" fontSize="13" fill="#0f172a" fontWeight="bold">設備B</text>
+        <Row data={B} y="105" />
+      </svg>
+    </FigCard>
+  );
+};
+
+// --- 問題6：評価指標の計算結果（解答情報。解説画面でのみ表示） ---
+const EvalTable = () => (
+  <FigCard caption="表：設備A・Bの評価指標の計算結果">
+    <table className="w-full border-collapse text-center text-xs text-slate-800">
+      <thead>
+        <tr className="bg-slate-100">
+          <th className="border border-slate-300 px-2 py-2"></th>
+          <th className="border border-slate-300 px-2 py-2">①稼働時間</th>
+          <th className="border border-slate-300 px-2 py-2">②修復時間</th>
+          <th className="border border-slate-300 px-2 py-2">③故障回数</th>
+          <th className="border border-slate-300 px-2 py-2">MTBF<br />（平均故障間隔）<br />①÷③</th>
+          <th className="border border-slate-300 px-2 py-2">MTTR<br />（平均修復時間）<br />②÷③</th>
+          <th className="border border-slate-300 px-2 py-2">アベイラビリティ<br />（可用率）<br />①÷（①＋②）</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td className="border border-slate-300 px-2 py-2 font-bold">設備A</td>
+          <td className="border border-slate-300 px-2 py-2">180</td>
+          <td className="border border-slate-300 px-2 py-2">60</td>
+          <td className="border border-slate-300 px-2 py-2">3</td>
+          <td className="border border-slate-300 px-2 py-2">60</td>
+          <td className="border border-slate-300 px-2 py-2">20</td>
+          <td className="border border-slate-300 px-2 py-2">75.0%</td>
+        </tr>
+        <tr className="bg-slate-50">
+          <td className="border border-slate-300 px-2 py-2 font-bold">設備B</td>
+          <td className="border border-slate-300 px-2 py-2">200</td>
+          <td className="border border-slate-300 px-2 py-2">40</td>
+          <td className="border border-slate-300 px-2 py-2">3</td>
+          <td className="border border-slate-300 px-2 py-2">66.66…</td>
+          <td className="border border-slate-300 px-2 py-2">13.33…</td>
+          <td className="border border-slate-300 px-2 py-2">83.3%</td>
+        </tr>
+      </tbody>
+    </table>
+  </FigCard>
+);
+
+// --- 問題9：TPM 自主保全の7つのステップ（空欄A・B・Cを含む与条件） ---
+const TpmStepsFigure = () => {
+  const steps = [
+    { n: "１", label: "（　Ａ　）", blank: true },
+    { n: "２", label: "発生源･困難個所対策", blank: false },
+    { n: "３", label: "（　Ｂ　）", blank: true },
+    { n: "４", label: "総点検", blank: false },
+    { n: "５", label: "自主点検", blank: false },
+    { n: "６", label: "（　Ｃ　）", blank: true },
+    { n: "７", label: "自主管理の徹底", blank: false },
+  ];
+  return (
+    <FigCard caption="図：TPMにおける自主保全の7つのステップ">
+      <div className="mx-auto max-w-md space-y-1.5">
+        {steps.map((s, i) => (
+          <div
+            key={i}
+            className={`flex items-center gap-3 rounded-md border px-3 py-2 ${
+              s.blank ? "border-rose-400 bg-rose-50" : "border-slate-300 bg-slate-50"
+            }`}
+          >
+            <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-slate-700 text-xs font-bold text-white">
+              {s.n}
+            </span>
+            <span className={`text-sm font-bold ${s.blank ? "text-rose-600" : "text-slate-800"}`}>{s.label}</span>
+          </div>
+        ))}
+      </div>
+    </FigCard>
+  );
+};
+
+// ===================================================================
+// 図表のフェーズ別出し分け（解答漏洩ガードレール）
+// problem  : 解答前の出題画面。与条件のみ（答えを示す情報は描画しない）
+// explanation : 解答後の解説画面。解答・解説用の図表を描画
+// ===================================================================
+function renderFigures(qid, phase) {
+  if (phase === "problem") {
+    if (qid === 6) return <EquipmentGantt />;
+    if (qid === 9) return <TpmStepsFigure />;
+    return null;
+  }
+  // phase === "explanation"
+  switch (qid) {
+    case 1:
+      return (
+        <>
+          <ControlChart />
+          <FishboneChart />
+          <ParetoChart />
+          <Histogram />
+        </>
+      );
+    case 2:
+      return (
+        <>
+          <ControlChart />
+          <ScatterChart />
+          <FishboneChart />
+          <ParetoChart />
+        </>
+      );
+    case 6:
+      return <EvalTable />;
+    case 7:
+      return <MaintenanceTree />;
+    case 8:
+      return <MaintenanceTree />;
+    default:
+      return null;
+  }
+}
+
+// ===================================================================
+// 問題データ（添付DOCX「3-6過去問セレクト演習 生産のオペレーション」の
+// 全10問・全選択肢・正解・解説をノンカット収録。要約・省略は一切行わない。
+// answer は 0 始まりのインデックス。
+// category: quality=品質管理(QC) / equipment=設備管理・保全 / info=生産情報システム
+// ===================================================================
+const QUESTIONS = [
   {
     id: 1,
-    year: "令和2年 第16問",
-    title: "情報システムの移行",
-    question: "既存の情報システムから新しい情報システムに移行することは、しばしば困難を伴う。システム移行に関する記述として、最も適切なものはどれか。",
-    options: [
-      "移行規模が大きいほど、移行の時間を少なくするために一斉移行方式をとった方が良い。",
-      "オンプレミスの情報システムからクラウドサービスを利用した情報システムに移行する際には、全面的に移行するために、IaaS が提供するアプリケーションの機能だけを検討すれば良い。",
-      "既存のシステムが当面、問題なく稼働している場合には、コストの面から見て、機能追加や手直しをしたりせず、システム移行はできるだけ遅らせた方が良い。",
-      "スクラッチ開発した情報システムを刷新するためにパッケージソフトウェアの導入を図る際には、カスタマイズのコストを検討して、現状の業務プロセスの見直しを考慮する必要がある。"
+    title: "QC7つ道具",
+    source: "令和元年 第11問",
+    category: "quality",
+    question: `QC7つ道具に関する記述として、最も適切なものはどれか。`,
+    choices: [
+      `管理図は、2つの対になったデータをXY軸上に表した図である。`,
+      `特性要因図は、原因と結果の関係を魚の骨のように表した図である。`,
+      `パレート図は、不適合の原因を発生件数の昇順に並べた図である。`,
+      `ヒストグラムは、時系列データを折れ線グラフで表した図である。`,
     ],
-    answerIndex: 3,
-    explanation: `解答：エ\n経営情報システムから、情報システムの移行に関する出題です。\nシステム移行に関する具体的な状況が問われており、設問文を丁寧に検討することで正答を選択できる問題です。\n\nア：運用中システムの一斉移行方式に関する記述。一斉移行方式には、移行にかかる時間が小さいというメリットがあります。しかし、一斉移行時の作業負荷やトラブルが発生した際の影響が大きくなるなどのデメリットがあります。そのため、移行規模が大きい場合よりも、規模が小さい場合に向いた方式といえ不適切です。\nイ：IaaS(Infrastructure as a Service)はインフラのみ提供されますので、開発環境・ミドルウェア・アプリケーションなどはユーザ側が自前で用意する必要があります。よって不適切です。\nウ：一時的にコストが発生することがあっても、遅滞なくシステム移行を実施したりした方が、将来を見据えた場合のトータルコストが低くなることも考えられます。一時的なコストだけで判断するべきものではありません。よって不適切です。\nエ：スクラッチ開発した情報システムを刷新するためにパッケージソフトウェアを導入する際、必ず、現状の業務プロセスに合わない部分が出て来ます。パッケージソフトウェアのカスタマイズが必要になりますが、このカスタマイズのコストを抑えるため、現状の業務プロセスの見直しは有効です。よって適切です。`
+    answer: 1,
+    explanation: `本問は、QC７つ道具に関する問題です。
+では、選択肢を見ていきましょう。
+
+選択肢アですが、管理図は２つの対になったデータではなく、観測した個々のデータを表したグラフです。従って、不適切な記述です。
+
+選択肢イですが、特性要因図は、以下のグラフのように原因（要因）と結果（特性）の関係を魚の骨のように表わすことで、複合的な要因を整理する手法です。従って、適切な記述です。
+
+選択肢ウですが、パレート図は、不適合の原因を発生件数の昇順ではなく、降順で並べた図です。
+
+選択肢エですが、時系列データを折れ線グラフではなく、棒グラフで表した図です。従って、不適切な記述です。`,
   },
   {
     id: 2,
-    year: "平成22年 第14問改題",
-    title: "開発方法論",
-    question: "システム開発の基本フェーズは、要件定義、外部設計、内部設計、プログラム開発、各種テスト、稼働である。これら各フェーズを後戻りすることなく順に行っていく方法論を、ウォータフォール型システム開発方法論と呼ぶ。しかし、この方法論には種々の課題があるとされ、多様な方法論が開発されている。そのような方法論に関する記述として最も適切なものはどれか。",
-    options: [
-      "RADは、ウォータフォール型システム開発方法論よりも迅速に開発することを目的としたもので、システムエンジニアだけで構成される大人数の開発チームで一気に開発する方法論である。",
-      "スパイラル開発は、１つのフェーズが終わったら、もう一度、そのフェーズを繰り返すペアプログラミングと呼ばれる手法を用いて確実にシステムを開発していく方法論である。",
-      "システム開発を迅速かつ確実に進める方法論としてXPがあるが、それは仕様書をほとんど作成せず、ストーリーカードと受け入れテストを中心に開発を進める方法論である。",
-      "プロトタイピングは、フェーズ５の各種テストを簡略に行う方法論である。",
-      "スクラムは、動いているシステムを壊さずに、ソフトウェアを高速に、着実に、自動的に機能を増幅させ、本番環境にリリース可能な状態にする方法論である。"
+    title: "QC7つ道具と新QC7つ道具",
+    source: "令和4年 第11問",
+    category: "quality",
+    question: `QC7つ道具と新QC7つ道具に関する記述として、最も適切なものはどれか。`,
+    choices: [
+      `管理図は、時系列データをヒストグラムで表した図である。`,
+      `散布図は、不具合を原因別に集計し、件数が多い順に並べた図である。`,
+      `特性要因図は、原因と結果、目的と手段などが複雑に絡み合った問題の因果関係を表した図である。`,
+      `パレート図は、項目別に層別して出現頻度の高い順に並べるとともに、累積和を表した図である。`,
+      `連関図は、原因と結果の関係を魚の骨のように表した図である。`,
     ],
-    answerIndex: 2,
-    explanation: `解答：ウ\n\nア：RAD（Rapid Application Development）は、少人数のチームで担当し、開発期間を短縮する手法です。大人数のチームで開発するわけではありません。\nイ：スパイラル開発は、設計、開発、テストを何度もくり返すことで徐々にシステムを成長させていく手法です。ペアプログラミングはXPで使われる手法です。\nウ：XP（Extreme Programming）は「アジャイル開発プロセス」の手法の1つです。短い期間で反復的に設計・開発・テストを実施します。仕様書をほとんど作成せず、ストーリーカードと受け入れテストを中心に開発を進めます。適切です。\nエ：プロトタイピングは早い段階で試作品を作成しユーザが確認する方法です。テストフェーズを簡略化できるものではありません。\nオ：スクラムではモデリング段階とコーディング段階を往復しながらソフトウェア開発を行います。不適切です。`
+    answer: 3,
+    explanation: `QC7つ道具と新QC7つ道具に関する出題です。各ツールの特徴について、基本的な内容が問われています。
+QC7つ道具は、品質の改善活動をするための手法を7つ集めたものです。品質を向上させるための数値データを使った分析が中心で、①管理図、②パレート図、③ヒストグラム、④散布図、⑤特性要因図、⑥チェックシート、⑦層別があります。
+新QC7つ道具は、言語データを使って情報を整理し、発想を導くための手法を7つにまとめたものです。新QC7つ道具には、①親和図法、②連関図法、③系統図法、④マトリックス図法、⑤マトリックスデータ解析法、⑥PDPC法、⑦アロー・ダイヤグラム法があります。
+
+では、選択肢を見ていきましょう。
+選択肢アは不適切な記述です。管理図は、測定した値を折れ線グラフにした図です。測定値が異常かどうかを判別するために、上下に管理限界線が引かれており、製品や工程が基準（管理限界線）から外れていないかを継続的に管理する目的で使用されます。ヒストグラムで表した図ではありません。
+
+選択肢イは不適切な記述です。本肢はパレート図の説明です。散布図とは、2つの特性をX軸とY軸に取り、データを点でプロットしたものです。散布図は、2つの特性の間の相関関係を把握するために使うことができます。
+
+選択肢ウは不適切な記述です。本肢は連関図法の説明です。特性要因図とは、ある特性とそれをもたらす様々な要因の関係を図で表したものです。例えば、品質が悪いという問題に対して、その原因となっている要因を魚の骨のような形で記入していきます。
+
+選択肢エは適切な記述です。パレート図は、項目別に不良数などの件数を数えて、多い順に並べたグラフです。出現頻度の高い順に並べるとともに累積和を表します。
+
+選択肢オは不適切な記述です。本肢は特性要因図の説明です。連関図とは、原因と結果、目的と手段が絡みあった問題について、関係を明確にする手法です。原因と結果、目的と手段などをカード等に記入し、それらの関係を線で結ぶことで因果関係などを明確にします。
+QC7つ道具については過去の本試験で度々出題されています。それぞれ7つ道具の特徴について理解を深めておきましょう。`,
   },
   {
     id: 3,
-    year: "令和4年 第13問",
-    title: "システム開発の方法論",
-    question: "システム開発の方法論は多様である。システム開発に関する記述として、最も適切なものはどれか。",
-    options: [
-      "DevOps は、開発側と運用側とが密接に連携して、システムの導入や更新を柔軟かつ迅速に行う開発の方法論である。",
-      "XP は、開発の基幹手法としてペアプログラミングを用いる方法論であり、ウォーターフォール型開発を改善したものである。",
-      "ウォーターフォール型開発は、全体的なモデルを作成した上で、ユーザにとって価値ある機能のまとまりを単位として、計画、設計、構築を繰り返す方法論である。",
-      "スクラムは、動いているシステムを壊さずに、ソフトウェアを高速に、着実に、自動的に機能を増幅させ、本番環境にリリース可能な状態にする方法論である。",
-      "フィーチャ駆動開発は、開発工程を上流工程から下流工程へと順次移行し、後戻りはシステムの完成後にのみ許される方法論である。"
+    title: "設計・製造段階における品質",
+    source: "平成25年 第5問",
+    category: "quality",
+    question: `設計・製造段階における品質に関する記述として、最も適切なものはどれか。`,
+    choices: [
+      `製造品質は、製造段階で責任を持つべき品質であり、｢ねらいの品質｣と呼ばれている。`,
+      `設計品質は、品質特性に対する品質目標であり、｢できばえの品質｣と呼ばれている。`,
+      `代用特性は、品質特性を直接測定することが困難な場合に、その代わりとして用いられる特性である。`,
+      `品質特性は、顧客の要求をそのまま表現した特性であり、製品価格もその1つである。`,
     ],
-    answerIndex: 0,
-    explanation: `解答：ア\n\nア：DevOpsは、開発(Development)と運用(Operations)を組み合わせた用語です。開発側と運用側とが密接に連携して、システムの導入や更新を柔軟かつ迅速に行う開発の方法論を意味します。適切です。\nイ：XPはアジャイル開発プロセスの具体的な手法の1つであり、ウォーターフォール型開発を改善したものではありません。\nウ：記述はスパイラル型開発のものです。ウォーターフォール型は上流から順番に実施していく方法です。\nエ：スクラムはモデリング段階とコーディング段階を往復しながらソフトウェア開発を行います。\nオ：記述はウォーターフォール型開発に関する内容です。`
+    answer: 2,
+    explanation: `品質管理の種類と品質特性に関する問題です。
+品質管理の種類と品質特性の概要を押さえていれば、正解できる問題です。
+
+まず、品質管理の種類と、品質特性について復習しましょう。
+それでは選択肢を見ていきましょう。
+
+選択肢アについて、「製造品質」は、製品の製造時に結果として生じる品質であるため「結果の品質」あるいは「できばえの品質」と呼ばれます。「ねらいの品質」とは、「設計品質」のことです。よって選択肢アは不適切です。
+
+選択肢イについて、「設計品質」は、顧客の要求を満たすために目標として設定した品質のことであり「ねらいの品質」と呼ばれます。「できばえの品質」とは、「製造品質」のことです。よって選択肢イは不適切です。
+
+選択肢ウについて、「代用特性」とは、「顧客が求める品質特性を直接測定することが困難な場合に、その代用として用いる他の品質特性」のことです。よって選択肢ウは適切で、正解です。
+
+選択肢エについて、「品質特性」とは、製品が本来備えている特性で、その値が許容値から外れた場合は不適合品と判断される特性のことです。例えば、ボールペンの品質特性は、線の太さ、色、耐久性などとなります。製品価格は、複数の要素から決定される対価であり、製品に本来備わっている性質とはいえません。よって選択肢エは不適切です。`,
   },
   {
     id: 4,
-    year: "令和2年 第18問",
-    title: "プロジェクト管理の手法やチャート",
-    question: "プロジェクトを管理するために利用される手法やチャートに関する以下のａ～ｄの記述と、その名称の組み合わせとして、最も適切なものを下記の解答群から選べ。\na プロジェクトの計画を立てる際に用いられる手法の一つで、作業を管理可能な大きさに細分化するために、階層的に要素分解する手法。\nｂ 作業を金銭価値に換算して、定量的にコスト効率とスケジュール効率を評価する手法。\nｃ 作業開始と終了の予定と実績を表示した横棒グラフで、スケジュール管理に利用するチャート。\nｄ 横軸に開発期間、縦軸に予算消化率をとって表した折れ線グラフで、費用管理と進捗管理を同時に行うチャート。",
-    options: [
-      "ａ：PERT　ｂ：BAC　ｃ：ガントチャート　ｄ：管理図",
-      "ａ：PERT　ｂ：BAC　ｃ：流れ図　ｄ：トレンドチャート",
-      "ａ：WBS　ｂ：EVM　ｃ：ガントチャート　ｄ：トレンドチャート",
-      "ａ：WBS　ｂ：EVM　ｃ：流れ図　ｄ：管理図"
+    title: "TQMの3つの原則",
+    source: "平成25年 第13問",
+    category: "quality",
+    question: `TQM（総合的品質管理）の原則は、以下の3つに大別される。
+① 目的に関する原則
+② 手段に関する原則
+③ 目的の達成と手段の実践を支える組織の運営に関する原則
+このうちの｢②手段に関する原則｣に当てはまるものの組み合わせとして、最も適切なものはどれか。`,
+    choices: [
+      `源流管理、再発防止、事実に基づく管理。`,
+      `潜在トラブルの顕在化、QCD結果に基づく管理、教育・訓練の重視。`,
+      `品質第一、重点志向、標準化。`,
+      `マーケットイン、プロセス重視、未然防止。`,
     ],
-    answerIndex: 2,
-    explanation: `解答：ウ\n\na: WBS (Work Breakdown Structure) の説明です。作業を階層的に要素分解する手法です。\nb: EVM (Earned Value Management) の説明です。作業の進捗度を金額で表現することで管理します。\nc: ガントチャートの説明です。縦軸に作業項目、横軸に時間軸を置いて進捗を棒グラフで表します。\nd: トレンドチャートの説明です。予定（予算）と実績の折れ線グラフを描き、予実の差異や傾向を分析します。`
+    answer: 0,
+    explanation: `TQM（総合的品質管理）に関する問題です。
+TQMの3つの原則について、それぞれの特徴を覚えていれば、正解できる問題です。
+
+まずは、TQMの3つの原則について簡単に復習しましょう。
+それでは選択肢を見ていきましょう。
+
+選択肢アについて、記述してある考え方は全て、活動を進める手法や注意点、管理方法に関する考え方で、「手段に関する原則」に含まれる内容です。よって選択肢アは適切で、正解です。
+
+選択肢イについて、「潜在トラブルの顕在化」と「QCD結果に基づく管理」の考え方は、「手段に関する原則」に含まれる内容です。但し、「教育・訓練の重視」は人に関する考え方で、「目的の達成と手段の実践を支える組織の運営に関する原則」に含まれる内容です。よって選択肢イは不適切です。
+
+選択肢ウについて、「品質第一」は顧客視点に立つことを重視する考え方で、「目的に関する原則」に含まれる内容です。よって選択肢ウは不適切です。なお、「重点志向」と｢標準化」の考え方は「手段に関する原則」に含まれる内容です。
+
+選択肢エについて、「マーケットイン」は、顧客視点に立つことを重視する考え方で「目的に関する原則」に含まれる内容です。よって選択肢エは不適切です。なお、「プロセス重視」と「未然防止」の考え方は「手段に関する原則」に含まれる内容です。
+
+3つの原則のそれぞれの特徴を押さえておきましょう。`,
   },
   {
     id: 5,
-    year: "平成30年 第18問",
-    title: "見積手法",
-    question: "ソフトウェア開発では、仕様の曖昧さなどが原因で工数オーバーとなるケースが散見される。開発規模の見積もりに関する記述として、最も適切なものはどれか。",
-    options: [
-      "CoBRA法では、開発工数は開発規模に比例することを仮定するとともに、さまざまな変動要因によって工数増加が発生することを加味している。",
-      "LOC法では、画面や帳票の数をもとに開発規模を計算するため、仕様書が完成する前の要件定義段階での見積もりは難しい。",
-      "標準タスク法は、ソフトウェアの構造をWBS（Work Breakdown Structure）に分解し、WBSごとに工数を積み上げて開発規模を見積もる方法である。",
-      "ファンクション・ポイント法は、システムのファンクションごとにプログラマーのスキルを数値化した重みを付けて、プログラム・ステップ数を算出する。"
+    title: "設備総合効率",
+    source: "令和2年 第20問",
+    category: "equipment",
+    question: `設備総合効率に関する記述として、最も適切なものはどれか。`,
+    choices: [
+      `作業方法を変更して段取時間を短縮すると、性能稼働率が向上する。`,
+      `設備の立ち上げ時間を短縮すると、時間稼働率が低下する。`,
+      `チョコ停の総時間を削減すると、性能稼働率が向上する。`,
+      `不適合率を改善すると、性能稼働率が低下する。`,
     ],
-    answerIndex: 0,
-    explanation: `解答：ア\n\nア：CoBRA（Cost estimation, Benchmarking and Risk Assessment）法は、経験豊富なプロジェクト・マネージャー等の知識を元に、様々な変動要因を抽出・定量化し見積を作成する方法です。適切です。\nイ：LOC(Lines Of Code)法は、プログラムの行数により開発規模を見積もる方法です。\nウ：標準タスク法は、「ソフトウェアの作業工程」をWBSに分解し見積もる方法です。「ソフトウェアの構造」ではありません。\nエ：ファンクションポイント法は、機能（ファンクション）ごとの複雑さによって点数を付け工数を見積もる方法です。プログラマーのスキルで重み付けするわけではありません。`
+    answer: 2,
+    explanation: `設備総合効率に関する問題です。
+まず、以下の式を確認しておきましょう。
+設備総合効率＝時間稼働率×性能稼働率×良品率
+時間稼働率＝（負荷時間－停止時間）/負荷時間×100（％）
+性能稼働率＝（基準サイクルタイム×加工数量）/稼働時間×100（％）
+良品率＝（加工数量－不良数量）/加工数量×100（％）
+選択肢アですが、段取時間を短縮すると停止時間が減るため、性能稼働率ではなく、時間稼働率が向上します。したがって、不適切な記述です。
+選択肢イですが、設備の立ち上げ時間を短縮すると、停止時間が減るため時間稼働率が向上します。したがって、不適切な記述です。
+選択肢ウですが、チョコ停とは、設備がトラブルにより一時的に停止する現象です。チョコ停の総時間を削減すると、性能稼働率が向上します。したがって、適切な記述です。
+選択肢エですが、不適合率を改善すると良品率が向上します。したがって、不適切な記述です。`,
   },
   {
     id: 6,
-    year: "令和4年 第19問",
-    title: "EVMS",
-    question: "中小企業Ａ社では、基幹業務系システムの刷新プロジェクトを進めている。先月のプロジェクト会議で、PV（出来高計画値）が1,200 万円、AC（コスト実績値）が800 万円、EV（出来高実績値）が600 万円であることが報告された。このとき、コスト効率指数（CPI）とスケジュール効率指数（SPI）に関する記述として、最も適切なものはどれか。",
-    options: [
-      "CPI は0.50 であり、SPI は0.67 である。",
-      "CPI は0.50 であり、SPI は0.75 である。",
-      "CPI は0.67 であり、SPI は0.50 である。",
-      "CPI は0.67 であり、SPI は0.75 である。",
-      "CPI は0.75 であり、SPI は0.50 である。"
+    title: "設備の故障（信頼性・保全性）",
+    source: "令和3年 第19問",
+    category: "equipment",
+    question: `初期導入された設備AとBを240時間利用したときの稼働および故障修復について、下図のような調査結果が得られた。この2台の設備に関する記述a～cの正誤の組み合わせとして、最も適切なものを下記の解答群から選べ。
+
+ａ　MTBF（平均故障間隔）は設備Ｂのほうが長い。
+ｂ　MTTR（平均修復時間）は設備Ｂのほうが長い。
+ｃ　アベイラビリティ（可用率）は設備Ｂのほうが高い。`,
+    choices: [
+      `ａ：正　　ｂ：正　　ｃ：誤`,
+      `ａ：正　　ｂ：誤　　ｃ：正`,
+      `ａ：正　　ｂ：誤　　ｃ：誤`,
+      `ａ：誤　　ｂ：正　　ｃ：正`,
+      `ａ：誤　　ｂ：正　　ｃ：誤`,
     ],
-    answerIndex: 4,
-    explanation: `解答：オ\nEVMS（Earned Value Management System）に関する問題です。\n\n・PV = 1,200万円\n・AC = 800万円\n・EV = 600万円\n\nコスト指標(CPI) = EV / AC\nスケジュール指標(SPI) = EV / PV\n\nCPI = 600 / 800 = 0.75\nSPI = 600 / 1200 = 0.50\n\nよって、オが正解となります。`
+    answer: 1,
+    explanation: `設備の故障に関する出題です。設備の稼働と故障の状況を図表から読み取ります。
+MTBFやMTTRについては、経営情報システムの科目でも学習します。ただ、運営管理でも出題されることがある論点です。科目を横断して出題されても対処できるように、問題演習を通じて身につけていきましょう。
+本問の設備Aと設備Bの評価指標を計算すると次の通りです。
+
+では、選択肢を見ていきましょう。
+
+ａは正しい記述です。MTBF（平均故障間隔）とは、故障が修復されてから次の故障までの動作時間の平均値です。上記の表の通り、設備Bの方が長いです。
+
+ｂの記述は誤りです。MTTR（平均修復時間）とは、修復に費やした時間の平均値です。上記の表の通り、設備Aの方が長いです。
+
+ｃは正しい記述です。アベイラビリティ（可用率）とは、必要とされるときに設備が使用中または運転可能である確率です。上記の表の通り、設備Bの方が高いです。
+
+よって、ａ：正　 ｂ：誤　 ｃ：正　となり、選択肢イが正解です。
+評価指標の種類と計算方法をしっかり覚えておきましょう。`,
   },
   {
     id: 7,
-    year: "令和4年 第18問",
-    title: "ITサービスマネジメント",
-    question: "IT サービスマネジメントとは、IT サービス提供者が、提供するIT サービスを効率的かつ効果的に運営管理するための枠組みである。IT サービスマネジメントに関する記述として、最も適切なものはどれか。",
-    options: [
-      "COSO は、IT サービスマネジメントのベストプラクティス集である。",
-      "IT サービスマネジメントシステムの構築に経営者が深く関与することは、避けた方が良い。",
-      "IT サービスマネジメントシステムの認証を受けるとP マークを取得できる。",
-      "IT サービスマネジメントにおけるインシデントとは、顧客情報の流出によってセキュリティ上の脅威となる事象のことをいう。",
-      "SLA は、サービス内容およびサービス目標値に関するサービス提供者と顧客間の合意である。"
+    title: "保全活動1",
+    source: "平成27年 第18問",
+    category: "equipment",
+    question: `保全活動に関する記述として、最も適切なものはどれか。`,
+    choices: [
+      `改良保全は、設備故障の発生から修復までの時間を短縮する活動である。`,
+      `保全活動は、予防保全、改良保全、保全予防の3つに分けられる。`,
+      `保全予防は、設備の計画・設計段階から、過去の保全実績等の情報を用いて不良や故障に関する事項を予測し、これらを排除するための対策を織り込む活動である。`,
+      `予防保全は、定期保全と集中保全の2つに分けられる。`,
     ],
-    answerIndex: 4,
-    explanation: `解答：オ\n\nア：ITサービスマネジメントのベストプラクティス集は「ITIL」です。\nイ：ITサービスマネジメントシステムの構築には、経営者が深く関与する（コミットメント）ことがポイントとされています。\nウ：ITサービスマネジメントシステムの認証はITSMS認定マークです。Pマークは個人情報保護体制の認証です。\nエ：インシデントは顧客情報の流出に限りません。計画外の中断や品質低下などを含みます。\nオ：SLA（Service Level Agreement）は、提供するサービス内容や品質に対する水準を定めた合意文書です。適切です。`
+    answer: 2,
+    explanation: `保全活動に関する問題です。
+保全活動の種類は、次のように体系立てて整理できます。
+
+それでは選択肢を見ていきましょう。
+選択肢アについて、改良保全は、設備そのものが故障しにくくなるように改良することです。設備故障の発生から修復までの時間を短縮する活動ではありません。よって選択肢アは不適切です。
+選択肢イについて、保全活動は大きく分けると、設備を維持する活動と、改善する活動になります。さらに、設備を維持する活動には、予防保全と事後保全があります。設備を改善する活動には、改良保全と保全予防があります。このような分類になりますので、選択肢イは不適切です。
+選択肢ウについて、保全予防は、設備の計画、設計段階から故障や性能の劣化を防ぐための活動です。保全予防では、過去の保全実績を記録しておき、それを基に新しい設備を計画・設計します。よって選択肢ウは適切で、正解です。
+選択肢エについて、予防保全は、故障を未然に防ぐための活動です。予防保全はさらに定期保全と予知保全に分けられます。定期保全は、その名の通り定期的に実施する保全活動です。予知保全は、設備の劣化傾向を設備診断技術などによって管理し、故障に至る前の最適な時期に最善の対策を行う保全の方法です。よって選択肢エは不適切です。`,
   },
   {
     id: 8,
-    year: "令和5年 第19問",
-    title: "ITサービスマネジメント2",
-    question: "IT サービスマネジメントにおいて取り交わす文書に関する以下の①～③の記述とその用語の組み合わせとして、最も適切なものを選べ。\n① サービス提供者が組織外部の供給者と取り交わす文書\n② サービス提供者が組織内部の供給者と取り交わす文書\n③ サービス提供者が顧客と取り交わす文書",
-    options: [
-      "①：NDA ②：SLA ③：OLA",
-      "①：OLA ②：NDA ③：UC",
-      "①：OLA ②：UC ③：SLA",
-      "①：SLA ②：UC ③：OLA",
-      "①：UC ②：OLA ③：SLA"
+    title: "保全活動2",
+    source: "令和4年 第17問",
+    category: "equipment",
+    question: `生産保全の観点から見た保全活動に関する記述として、最も適切なものはどれか。`,
+    choices: [
+      `あらかじめ代替機を用意し、故障してから修理した方がコストがかからない場合は、予防保全を選択する。`,
+      `過去に発生した故障が再発しないように改善を加える活動は、事後保全である。`,
+      `設備の劣化傾向について設備診断技術などを用いて管理することによって、保全の時期や修理方法などを決める予防保全の方法を状態監視保全という。`,
+      `掃除、給油、増し締めなどの活動は、設備の劣化を防ぐために実施される改良保全である。`,
     ],
-    answerIndex: 4,
-    explanation: `解答：オ\n\n① 組織外部の供給者と取り交わす文書：UC（Underpinning Contract）\n② 組織内部の供給者と取り交わす文書：OLA（Operational Level Agreement）\n③ 顧客と取り交わす文書：SLA（Service Level Agreement）\n\n※NDAは秘密保持契約であり、ITサービスマネジメント特有の用語ではありません。`
+    answer: 2,
+    explanation: `保全活動に関する出題です。保全活動の種類と特徴について知識を問う問題です。
+保全活動は大きく分けて、設備を「維持する活動」と設備を「改善する活動」があります。設備を維持する活動には予防保全と事後保全があり、設備を改善する活動には改良保全と保全予防があります。本問では、それぞれの保全活動の目的を理解していることがポイントです。
+
+では、選択肢を見ていきましょう。
+選択肢アは不適切な記述です。予防保全は、故障を未然に防ぐための活動です。設備の定期点検や古くなった部品を交換する活動が含まれます。あらかじめ代替機を用意し、故障してから修理した方がコストがかからない場合は、事後保全を選択します。
+
+選択肢イは不適切な記述です。事後保全は、故障が発見された後の活動です。故障した設備を修理するような活動が含まれます。過去に発生した故障が再発しないように改善を加える活動は、改良保全です。
+
+選択肢ウは適切な記述です。状態監視保全は、設備の劣化傾向を設備診断技術などによって管理し、故障に至る前の最適な時期に最善の対策を行う方法です。
+
+選択肢エは不適切な記述です。改良保全は、設備そのものが故障しにくくなるように改良を施すことです。単に故障を直すだけでなく、故障しやすい設備の構造自体を改良することで、故障の防止や性能の向上を目指します。設備の劣化を防ぐために実施される掃除、給油、増し締めなどの活動は予防保全です。
+
+保全活動は目的に応じて様々な活動があります。似たような名称で混同しやすいので、体系図で整理しながらそれぞれの活動の特徴を理解しておきましょう。`,
   },
   {
     id: 9,
-    year: "平成30年 第17問",
-    title: "システム開発の外注",
-    question: "A社は自社の業務システムを全面的に改訂しようとしている。候補に挙がっているいくつかのITベンダーの中からシステム開発先を決定したい。A社がITベンダーに出す文書に関する記述として、最も適切なものはどれか。",
-    options: [
-      "RFIとは、自社が利用可能な技術などをベンダーに伝え、システム開発を依頼する文書をいう。",
-      "RFIとは、システムが提供するサービスの品質保証やペナルティに関する契約内容を明らかにし、システム開発を依頼する文書をいう。",
-      "RFPとは、システムの概要や主要な機能などに関する提案を依頼する文書をいう。",
-      "RFPとは、システムライフサイクル全体にわたる、システム開発および運用にかかるコスト見積もりを依頼する文書をいう。"
+    title: "自主保全のステップ",
+    source: "平成25年 第19問",
+    category: "equipment",
+    question: `TPM（Total Productive Maintenance）における自主保全の7つのステップを示す以下の図の空欄Ａ〜Ｃに入る語句として、最も適切なものの組み合わせを下記の解答群から選べ。`,
+    choices: [
+      `Ａ：故障原因の究明　Ｂ：故障の再発防止策の策定　Ｃ：標準化`,
+      `Ａ：故障原因の究明　Ｂ：自主保全仮基準の作成　Ｃ：保全組織の決定`,
+      `Ａ：初期清掃(清掃・点検)　Ｂ：故障の再発防止策の策定　Ｃ：保全組織の決定`,
+      `Ａ：初期清掃(清掃・点検)　Ｂ：自主保全仮基準の作成　Ｃ：標準化`,
     ],
-    answerIndex: 2,
-    explanation: `解答：ウ\n\nア・イ：RFI（情報提供依頼書）は、発注先候補のシステム開発会社に情報提供を依頼する文書です。アの「要件を伝達する」のはRFP、イの「品質保証等を合意する」のはSLAの説明です。\nウ：RFP（提案依頼書）は、発注先の業者に提案を要求し、要件を伝えるための文書です。適切です。\nエ：システムライフサイクル全体にわたるコストはTCO（Total Cost of Ownership）といいます。RFPの説明としては不適切です。`
+    answer: 3,
+    explanation: `TPM（Total Productive Maintenance）に関する問題です。
+本問では、TPMにおける自主保全の実施ステップの順番が問われています。7つの順番を完全に覚えていなくても、要所を押さえていれば、正解できる問題です。
+
+まずは、TPMの実施ステップを簡単に復習しましょう。
+TPMとは、生産部門をはじめ、開発・営業・管理などのあらゆる部門にわたってトップから第一線従業員にいたるまで全員が参加し、ロス・ゼロを達成する保全活動です。その活動の基本構成は3つの段階に分けられ、さらに7つのステップで実施されます。
+
+・段階1：劣化を防ぐ活動
+設備の清掃・点検を中心に、設備の基本条件を徹底的に整備し、維持体制をつくる段階です。第1～第3までの「初期清掃（清掃・点検）」、「発生源・困難箇所対策」、「自主保全の仮基準の作成」の3つのステップが含まれます。
+
+・段階2：劣化を測る活動
+設備総点検の教育と実施により、劣化を防ぐ活動から劣化を測る活動へと発展させます。五感から理屈に裏付けられた日常点検ができる「設備に強いオペレーター」を目指す段階です。第4～第5までの「総点検」、「自主点検」の2つのステップが含まれます。
+
+・段階3：標準化と自主管理の活動
+標準化と自主管理の仕上げの段階です。オペレーター自身が必要な保全技能の完成を図ることで、オペレーターと現場が大きく変わり、自主管理の職場となります。第6～第7ステップの「標準化」、「自主管理の徹底」の2つのステップが含まれます。
+
+それでは、選択肢を見ていきましょう。
+Ａについて、段階1の最初の活動で「初期清掃(清掃・点検)」となります。これは全てのベースとなる非常に重要な活動です。
+
+Ｂについて、段階1の最後の活動で、短時間で清掃・給油・増締め・点検を確実に維持できるような行動基準となる、「自主保全仮基準の作成」をすることで、劣化を防ぎます。
+
+Ｃについて、段階3の仕上げの活動の一つで「標準化」となります。
+
+ここまで踏まえた上で選択肢を見ると、正解はエであることが分かります。
+TPM活動の基本を構成する3つの段階については、その名称と内容をしっかり押さえておきましょう。また、7つのステップについても、全て覚えるのは難しいかもしれませんが、「初期清掃」ではじまり、「標準化」と「自主管理」をもって仕上げる点を、合わせて押さえておきましょう。`,
   },
   {
     id: 10,
-    year: "平成24年 第17問",
-    title: "設計手法と設計図",
-    question: "ある中小販売企業では、インターネットで受注を開始することにした。それに先立ち、図を描いて受注システムの検討を行っている。（※プロセス、データストア、データフローで構成された図）。この図に関する説明として最も適切なものを選べ。",
-    options: [
-      "業務のデータの流れと処理の関係を記述したDFDである。",
-      "データベースをどのように構築したら良いかを示すERDである。",
-      "利用者がシステムとどのようにやり取りするかを示すユースケース図である。",
-      "利用者相互のコミュニケーションの関係を描いたコミュニケーション図である。"
+    title: "生産情報システム",
+    source: "平成24年 第5問",
+    category: "info",
+    question: `生産活動におけるコンピュータ支援技術に関する記述として、最も適切なものはどれか。`,
+    choices: [
+      `コンピュータの内部に表現されたモデルに基づいて、生産に必要な各種情報を作成すること、およびそれに基づいて進める生産の形式は、CADと呼ばれる。`,
+      `生産活動に関連する設備、システムの運用、管理などについて、コンピュータの支援のもとで教育または学習を行う方法は、CAIと呼ばれる。`,
+      `製品の形状その他の属性データからなるモデルをコンピュータ内部に作成し、解析・処理することによって進める設計は、CAEと呼ばれる。`,
+      `製品を製造するために必要な情報をコンピュータを用いて統合的に処理し、製品、品質、製造工程などを解析評価することは、CAMと呼ばれる`,
     ],
-    answerIndex: 0,
-    explanation: `解答：ア\n問題文で示されている図（プロセスが円、データストアが平行線等で描かれる図）はDFD（Data Flow Diagram：データフローダイアグラム）です。\nDFDはデータと処理の流れを表す図表です。\n\nイ：ERDはエンティティとリレーションで表す図。\nウ：ユースケース図はアクターとユースケースの関連を表す図。\nエ：コミュニケーション図はオブジェクト同士のメッセージのやり取りを表す図。`
+    answer: 1,
+    explanation: `生産情報システムに関する出題です。
+それでは選択肢を見ていきましょう。
+選択肢アについて、CADは、製品の設計をコンピュータを利用して行うシステムです。選択肢アの記述は、CAMのことを説明した内容になっています。よって選択肢アは不適切です。
+
+選択肢イについて、CAIは、Computer-Aided Instructionの略で、コンピュータを活用して教育プログラムを提供するシステムです。生産活動やシステムの運用、管理に限らず、子どもの教育や学生の勉強、大人の資格や趣味の学習など、活用範囲は多岐にわたります。選択肢イは、CAIのことを説明した記述ですので、選択肢イは適切です。よってこれが正解です。
+
+選択肢ウについて、CAEは、製品のシミュレーションを行うシステムです。CAEを用いることで、製品を実際に作る前に、強度や安定性、性能などをシミュレーションで評価することができます。選択肢ウは、CADすなわちコンピュータ支援設計のことを説明した記述です。よって選択肢ウは不適切です。
+
+選択肢エについて、CAMは、コンピュータ内部で表現されたモデルに基づいて生産に必要な情報を生成するシステムです。CAMでは、CADなどで設計したモデルを基に、NC工作機械などで生産できるようなプログラムを生成します。選択肢エは、CAEのことを説明した記述です。よって選択肢エは不適切です。`,
   },
-  {
-    id: 11,
-    year: "平成26年 第17問",
-    title: "システム分析・設計に使われる図",
-    question: "システム分析もしくはシステム設計に使われる図（図A：アクターと楕円、図B：開始・終了・条件分岐ノード、図C：プロセスとデータストア、図D：オブジェクトと矢印メッセージ）の名称の組み合わせとして最も適切なものを選べ。",
-    options: [
-      "図Ａ：アクティビティ図　 図Ｂ：ステートチャート図　図Ｃ：DFD　 図Ｄ：ユースケース図",
-      "図Ａ：コミュニケーション図 　図Ｂ：アクティビティ図　図Ｃ：オブジェクト図　 図Ｄ：配置図",
-      "図Ａ：ユースケース図　 図Ｂ：DFD　図Ｃ：アクティビティ図　 図Ｄ：コミュニケーション図",
-      "図Ａ：ユースケース図　図Ｂ：アクティビティ図　図Ｃ：DFD 　図Ｄ：コミュニケーション図"
-    ],
-    answerIndex: 3,
-    explanation: `解答：エ\n\n図A：アクター（人型）とユースケース（楕円）による「ユースケース図」\n図B：フローチャートのようにノードや分岐で処理を記述する「アクティビティ図」\n図C：プロセス（円）とデータストア（平行線）のデータの流れを示す「DFD」\n図D：オブジェクト間でやり取りされるメッセージを記述した「コミュニケーション図」`
-  },
-  {
-    id: 12,
-    year: "平成27年 第16問",
-    title: "システム設計に使われる図",
-    question: "システム設計の際に使われる図に関する以下の①〜④の記述と、図の名称の組み合わせとして、最も適切なものを選べ。\n①情報システムの内外の関係するデータの流れを表す図。\n②データを、実体、関連およびそれらの属性を要素としてモデル化する図。\n③システムにはどのような利用者がいるのか、利用者はどのような操作をするのかを示すために使われる図。\n④システムの物理的構成要素の依存関係に注目してシステムの構造を記述する図。",
-    options: [
-      "①：DFD　②：ERD 　③：アクティビティ図　④：配置図",
-      "①：DFD　②：ERD 　③：ユースケース図　④：コンポーネント図",
-      "①：ERD　②：DFD 　③：ステートチャート図　④：コンポーネント図",
-      "①：ERD　②：DFD 　③：ユースケース図　④：配置図"
-    ],
-    answerIndex: 1,
-    explanation: `解答：イ\n\n① データの流れを表す図：DFD\n② 実体(Entity)・関連(Relationship)を表す図：ERD(ER図)\n③ 利用者(アクター)と操作(ユースケース)を示す図：ユースケース図\n④ 物理的構成要素(コンポーネント)の依存関係を記述する図：コンポーネント図`
-  },
-  {
-    id: 13,
-    year: "平成26年 第15問",
-    title: "近年のシステム開発手法",
-    question: "近年注目されているシステム開発手法に関する記述として、最も適切なものはどれか。",
-    options: [
-      "エクストリームプログラミングは、システムテストを省くなどしてウォーターフォール型システム開発を改善した手法である。",
-      "エンベデッドシステムは、あらかじめインストールしておいたアプリケーションを有効に利用してシステム開発を行う手法である。",
-      "オープンデータは、開発前にシステム構想およびデータをユーザに示し、ユーザからのアイデアを取り入れながらシステム開発を行う手法である。",
-      "スクラムは、開発途中でユーザの要求が変化することに対処しやすいアジャイルソフトウェア開発のひとつの手法である。"
-    ],
-    answerIndex: 3,
-    explanation: `解答：エ\n\nア：エクストリームプログラミング(XP)はアジャイル開発プロセスの１つで、システムテストを省くわけではありません。\nイ：エンベデッドシステムは、家電や自動車などに組み込まれるコンピュータシステム（組込みシステム）のことです。\nウ：オープンデータは、制限なく広く利用が許可されているデータや、行政機関が保有するデータを公開することを指します。\nエ：スクラムは、アジャイルソフトウェア開発のひとつの手法であり、ユーザのニーズを柔軟に反映させながら短期間で稼働させることを目指します。適切です。`
-  },
-  {
-    id: 14,
-    year: "平成27年 第18問",
-    title: "アジャイルシステム開発",
-    question: "アジャイルシステム開発の方法論であるフィーチャ駆動開発、スクラム、かんばん、XPに関する記述として、最も適切なものはどれか。",
-    options: [
-      "フィーチャ駆動開発は、要求定義、設計、コーディング、テスト、実装というシステム開発プロセスを逐次的に確実に行う方法論である。",
-      "スクラムは、ラウンドトリップ・エンジニアリングを取り入れたシステム開発の方法論である。",
-      "かんばんは、ジャストインタイムの手法を応用して、システム開発の際に、ユーザと開発者との間でかんばんと呼ばれる情報伝達ツールを用いることに特徴がある。",
-      "XPは、開発の基幹手法としてペアプログラミングを用いるが、それは複数のオブジェクトを複数の人々で分担して作成することで、システム開発の迅速化を図ろうとするものである。"
-    ],
-    answerIndex: 1,
-    explanation: `解答：イ\n\nア：逐次的に確実に行うのはウォーターフォール型です。\nイ：スクラムは、モデリング段階とコーディング段階を往復しながらソフトウェア開発を行う「ラウンドトリップ・エンジニアリング」を取り入れたシステム開発です。適切です。\nウ：かんばんは、開発者同士が情報伝達ツールを用いるものであり、ユーザと開発者との間ではありません。\nエ：XPのペアプログラミングは、2人1組で1台のPCに向かい、1人がコードを書きもう1人がチェックしながら進める手法です。複数人で分担してオブジェクトを作成するものではありません。`
-  },
-  {
-    id: 15,
-    year: "令和元年 第18問",
-    title: "情報システムのテスト",
-    question: "ある中小企業では、出退勤システムの実装を進めている。テストに関する記述として、最も適切なものはどれか。",
-    options: [
-      "結合テストは、出退勤システム全体の処理能力が十分であるか、高い負荷でも問題がないか、などの検証を行うために、実際に使う環境で行うテストである。",
-      "ブラックボックステストは、出退勤システムに修正を加えた場合に、想定外の影響が出ていないかを確認するためのテストである。",
-      "ホワイトボックステストは、社員証の読み取りの際のチェックディジットの条件を網羅的にチェックするなど、内部構造を理解した上で行うテストである。",
-      "リグレッションテストは、社員証の読み取りやサーバ送信などの複数モジュール間のインタフェースが正常に機能しているかを確認するテストである。"
-    ],
-    answerIndex: 2,
-    explanation: `解答：ウ\n\nア：記述は「負荷テスト」に関するものです。結合テストは複数モジュールの組み合わせをテストします。\nイ：記述は「回帰テスト（リグレッションテスト）」に関するものです。ブラックボックステストは入力と出力に注目したテストです。\nウ：ホワイトボックステストは、プログラムの内部構造に注目して、命令文や条件分岐などを網羅的にチェックするテストです。適切です。\nエ：記述は「結合テスト」に関するものです。リグレッションテストは修正による想定外の影響を確認するテストです。`
-  },
-  {
-    id: 16,
-    year: "平成23年 第20問",
-    title: "品質レビュー",
-    question: "ソフトウェア品質レビュー技法のうち、インスペクションの説明として最も適切なものはどれか。",
-    options: [
-      "プログラム作成者、進行まとめ役、記録係、説明役、レビュー役を明確に決めて、厳格なレビューを公式に行う。",
-      "プログラム作成者が他のメンバに問題点を説明して、コメントをもらう。",
-      "プログラム作成者とレビュー担当者の２名だけで、作成したプログラムを調べる。",
-      "プログラムを検査担当者に回覧して、個別にプログラムを調べてレビュー結果を戻してもらう。"
-    ],
-    answerIndex: 0,
-    explanation: `解答：ア\n\nインスペクションとは、ソフトウェア開発の各工程で作成された成果物について検証する作業です。公式なもので、役割（進行まとめ役、記録係など）を明確に決めて厳密に行います。よって、アが正解です。`
-  },
-  {
-    id: 17,
-    year: "平成25年 第19問",
-    title: "ホワイトボックステスト、ブラックボックステスト",
-    question: "ソフトウェアのテスト方法には、ホワイトボックステスト、ブラックボックステストなどがある。これらのうち、前2者に関する記述として最も適切なものはどれか。",
-    options: [
-      "ブラックボックステストでは、すべての場合を網羅した組み合わせテストによっても、すべての組み合わせバグを検出できるとは限らない。",
-      "ブラックボックステストは、システム仕様の視点からのテストである。",
-      "ブラックボックステストは、テスト対象が小さい場合にはホワイトボックステストよりも効果が高い。",
-      "ホワイトボックステストは、主にテスト段階の後期に行う。"
-    ],
-    answerIndex: 1,
-    explanation: `解答：イ\n\nア：ブラックボックステストで「すべての場合を網羅した組み合わせテスト」を行うことは実質的に不可能です（パターンが膨大になるため）。\nイ：ブラックボックステストは、入出力の観点からプログラムが仕様通りに動作するかを確認するテストです。システム仕様の視点からのテストと言えます。適切です。\nウ：ホワイトボックステストはテスト対象が小さい場合に効果が高いとされています。\nエ：ホワイトボックステストは主に「単体テスト」で行われるため、テスト段階の初期にあたります。`
-  },
-  {
-    id: 18,
-    year: "平成30年 第21問",
-    title: "回帰テスト、A/Bテスト",
-    question: "情報システムのテストに関する記述として最も適切なものはどれか。",
-    options: [
-      "システム開発の最終段階で、発注者として、そのシステムが実際に運用できるか否かを、人間系も含めて行うテストをベータテストという。",
-      "ソースコードの開発・追加・修正を終えたソフトウェアが正常に機能する状態にあるかを確認する予備的なテストをアルファテストという。",
-      "対象箇所や操作手順などを事前に定めず、実施者がテスト項目をランダムに選んで実行するテストを A/B テストという。",
-      "プログラムを変更した際に、その変更によって予想外の影響が現れていないかどうか確認するテストを回帰テストという。"
-    ],
-    answerIndex: 3,
-    explanation: `解答：エ\n\nア：ベータテストは正式リリース直前に一部のユーザに利用してもらうテストです。発注者が行うものではありません。\nイ：アルファテストは開発初期段階で一部のユーザに利用してもらうテストです。予備的なテストではありません。\nウ：A/Bテストは異なるデザイン等をユーザに提示し、どちらが支持されるかを確認するマーケティングテストです。\nエ：回帰テスト（リグレッションテスト）は、修正が既存システムに悪影響を及ぼさないか検証するテストです。適切です。`
-  }
 ];
 
-// ==========================================
+const TOTAL = QUESTIONS.length;
+
+// ===================================================================
+// 永続化ヘルパー（Firestore優先・LocalStorageフォールバック）
+// ===================================================================
+const lsKey = (userId) => `${APP_ID}__${userId}`;
+
+function loadLocal(userId) {
+  try {
+    const raw = localStorage.getItem(lsKey(userId));
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch (e) {
+    console.warn("[LocalStorage] 読み込み失敗", e);
+    return null;
+  }
+}
+
+function saveLocal(userId, data) {
+  try {
+    localStorage.setItem(lsKey(userId), JSON.stringify(data));
+  } catch (e) {
+    console.warn("[LocalStorage] 保存失敗", e);
+  }
+}
+
+// ===================================================================
 // メインコンポーネント
-// ==========================================
+// ===================================================================
 export default function App() {
-  const [userId, setUserId] = useState('');
-  const [isLoggedIn, setIsLoggedIn] = useState(false);
-  const [isLoading, setIsLoading] = useState(false);
-  
-  // ユーザーデータ状態
-  const [userData, setUserData] = useState({
-    history: {}, // { questionId: { correct: boolean, count: number } }
-    review: {}   // { questionId: boolean }
-  });
+  // 認証・初期化
+  const [authReady, setAuthReady] = useState(false);
 
-  // 再開用データ
-  const [resumeData, setResumeData] = useState({
-    progressIndex: 0,
-    progressMode: 'all'
-  });
+  // 画面：login / dashboard / quiz / result
+  const [screen, setScreen] = useState("login");
+  const screenRef = useRef(screen);
+  useEffect(() => {
+    screenRef.current = screen;
+  }, [screen]);
 
-  // アプリの状態管理
-  const [currentScreen, setCurrentScreen] = useState('menu'); // 'menu', 'quiz', 'history'
-  const [playMode, setPlayMode] = useState('all'); // 'all', 'wrong', 'review'
-  
-  // クイズプレイ中の状態
-  const [filteredQuestions, setFilteredQuestions] = useState([]);
+  // ユーザー識別（合言葉）
+  const [inputId, setInputId] = useState("");
+  const [userId, setUserId] = useState("");
+
+  // 学習データ
+  const [history, setHistory] = useState({}); // { [id]: { correct, answeredAt } }
+  const [reviews, setReviews] = useState({}); // { [id]: true }
+  const [progressIndex, setProgressIndex] = useState(0);
+  const [progressMode, setProgressMode] = useState("all");
+
+  // 途中再開モーダル
+  const isFirstLoad = useRef(true);
+  const [showResumeModal, setShowResumeModal] = useState(false);
+  const [pendingProgress, setPendingProgress] = useState(null);
+
+  // クイズ進行
+  const [mode, setMode] = useState("all"); // all / wrong / review
+  const [quizList, setQuizList] = useState([]);
   const [currentIndex, setCurrentIndex] = useState(0);
-  const [selectedOption, setSelectedOption] = useState(null);
-  const [showExplanation, setShowExplanation] = useState(false);
+  const [selected, setSelected] = useState(null);
+  const [isAnswered, setIsAnswered] = useState(false);
 
-  // ------------------------------------------
-  // Firebase データ取得
-  // ------------------------------------------
-  const fetchUserData = async (id) => {
-    if (!db) return;
-    setIsLoading(true);
-    try {
-      const docRef = doc(db, 'users', `${APP_ID}_${id}`);
-      const docSnap = await getDoc(docRef);
-      if (docSnap.exists()) {
-        const data = docSnap.data();
-        setUserData({
-          history: data?.history || {},
-          review: data?.review || {}
-        });
-        setResumeData({
-          progressIndex: data?.progressIndex || 0,
-          progressMode: data?.progressMode || 'all'
-        });
+  // --- 匿名認証（Firestoreアクセス前に必ず実行） ---
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      if (auth) {
+        try {
+          await signInAnonymously(auth);
+          console.log("[Auth] 匿名サインイン成功");
+        } catch (e) {
+          console.warn("[Auth] 匿名サインイン失敗。LocalStorageで動作します。", e);
+        }
       } else {
-        setUserData({ history: {}, review: {} });
-        setResumeData({ progressIndex: 0, progressMode: 'all' });
+        console.log("[Init] Firebase未設定。LocalStorageモードで動作します。");
       }
-    } catch (error) {
-      console.error("Error fetching user data:", error);
-    } finally {
-      setIsLoading(false);
-      setIsLoggedIn(true);
-    }
-  };
+      if (mounted) {
+        setAuthReady(true);
+        console.log("[Init] 初期化完了（authReady=true / 画面はloginのまま）");
+      }
+    })();
+    return () => {
+      mounted = false;
+    };
+  }, []);
 
-  const handleLogin = (e) => {
-    e.preventDefault();
-    if (userId.trim()) {
-      fetchUserData(userId.trim());
-    }
-  };
+  // --- userId 変更時に再開判定フラグをリセット ---
+  useEffect(() => {
+    isFirstLoad.current = true;
+  }, [userId]);
 
-  // ------------------------------------------
-  // Firebase データ保存
-  // ------------------------------------------
-  const saveUserDataToFirebase = async (newHistory, newReview, pIndex = 0, pMode = 'all') => {
-    if (!db || !isLoggedIn) return;
-    try {
-      const docRef = doc(db, 'users', `${APP_ID}_${userId}`);
-      await setDoc(docRef, {
-        history: newHistory,
-        review: newReview,
-        progressIndex: pIndex,
-        progressMode: pMode
-      }, { merge: true });
-      console.log("Saved to Firebase", { pIndex, pMode });
-    } catch (error) {
-      console.error("Error saving user data:", error);
-    }
-  };
+  // --- データ購読（Firestore onSnapshot / LocalStorageフォールバック） ---
+  useEffect(() => {
+    if (!userId) return;
 
-  // ------------------------------------------
-  // クイズ進行ロジック
-  // ------------------------------------------
-  const startQuiz = (mode, useResume = false) => {
-    let list = [];
-    if (mode === 'all') {
-      list = [...quizData];
-    } else if (mode === 'wrong') {
-      list = quizData.filter(q => userData.history[q.id]?.correct === false);
-    } else if (mode === 'review') {
-      list = quizData.filter(q => userData.review[q.id] === true);
-    }
+    const applyData = (data) => {
+      const parsed = {
+        progressIndex: Number(data?.progressIndex || 0),
+        progressMode: data?.progressMode || "all",
+        history: data?.history || {},
+        reviews: data?.reviews || {},
+      };
+      setHistory(parsed.history);
+      setReviews(parsed.reviews);
+      setProgressIndex(parsed.progressIndex);
+      setProgressMode(parsed.progressMode);
+      console.log("[Sync] データ受信", { progressIndex: parsed.progressIndex, progressMode: parsed.progressMode });
 
-    if (list.length === 0) {
-      alert("該当する問題がありません！");
-      return;
-    }
-
-    setPlayMode(mode);
-    setFilteredQuestions(list);
-    
-    const startIndex = useResume ? resumeData.progressIndex : 0;
-    setCurrentIndex(startIndex >= list.length ? 0 : startIndex);
-    
-    setSelectedOption(null);
-    setShowExplanation(false);
-    setCurrentScreen('quiz');
-    
-    if (!useResume) {
-      saveUserDataToFirebase(userData.history, userData.review, 0, mode);
-    }
-  };
-
-  const handleAnswerClick = (index) => {
-    if (showExplanation) return; // 二度押し防止
-    setSelectedOption(index);
-    setShowExplanation(true);
-
-    const currentQ = filteredQuestions[currentIndex];
-    const isCorrect = index === currentQ.answerIndex;
-
-    const newHistory = { ...userData.history };
-    const prevCount = newHistory[currentQ.id]?.count || 0;
-    newHistory[currentQ.id] = {
-      correct: isCorrect,
-      count: prevCount + 1
+      // 【ガードレール】初回ロード判定 かつ 画面がダッシュボードのときのみ途中再開モーダルをトリガー。
+      // これによりクイズ解答中のonSnapshot受信で再開ダイアログが誤って割り込むのを完全に防ぐ。
+      if (isFirstLoad.current && screenRef.current === "dashboard") {
+        isFirstLoad.current = false;
+        if (parsed.progressIndex > 0) {
+          setPendingProgress(parsed);
+          setShowResumeModal(true);
+          console.log("[Resume] 途中再開モーダルを表示", parsed.progressIndex, parsed.progressMode);
+        }
+      }
     };
 
-    setUserData(prev => ({ ...prev, history: newHistory }));
-    
-    // 現在の進捗状況を保存
-    saveUserDataToFirebase(newHistory, userData.review, currentIndex, playMode);
-  };
-
-  const handleNextQuestion = () => {
-    const nextIndex = currentIndex + 1;
-    if (nextIndex < filteredQuestions.length) {
-      setCurrentIndex(nextIndex);
-      setSelectedOption(null);
-      setShowExplanation(false);
-      saveUserDataToFirebase(userData.history, userData.review, nextIndex, playMode);
+    if (db && auth?.currentUser) {
+      const docRef = doc(db, "artifacts", APP_ID, "users", userId);
+      const unsubscribe = onSnapshot(
+        docRef,
+        (snapshot) => {
+          try {
+            const data = snapshot.exists() ? snapshot.data() : {};
+            applyData(data);
+          } catch (e) {
+            console.warn("[Sync] スナップショット処理エラー。フォールバックします。", e);
+            applyData(loadLocal(userId) || {});
+          }
+        },
+        (err) => {
+          console.warn("[Sync] onSnapshotエラー。LocalStorageで継続します。", err);
+          applyData(loadLocal(userId) || {});
+        }
+      );
+      return () => unsubscribe();
     } else {
-      // 完走したら進捗リセット
-      saveUserDataToFirebase(userData.history, userData.review, 0, playMode);
-      setResumeData({ progressIndex: 0, progressMode: 'all' });
-      setCurrentScreen('menu');
-      alert("お疲れ様でした！すべての問題を完了しました。");
+      // Firestore未使用：LocalStorageから一度だけ読み込み
+      applyData(loadLocal(userId) || {});
     }
+  }, [userId]);
+
+  // --- 永続化（Firestore + LocalStorage 両方へ） ---
+  const persist = useCallback(
+    async (next) => {
+      if (!userId) return;
+      const merged = {
+        history: next.history ?? history,
+        reviews: next.reviews ?? reviews,
+        progressIndex: next.progressIndex ?? progressIndex,
+        progressMode: next.progressMode ?? progressMode,
+        updatedAt: new Date().toISOString(),
+      };
+      saveLocal(userId, merged);
+      if (db && auth?.currentUser) {
+        try {
+          const docRef = doc(db, "artifacts", APP_ID, "users", userId);
+          await setDoc(docRef, merged, { merge: true });
+          console.log("[Save] Firestoreへ保存", { progressIndex: merged.progressIndex, progressMode: merged.progressMode });
+        } catch (e) {
+          console.warn("[Save] Firestore保存失敗。LocalStorageのみ保持します。", e);
+        }
+      }
+    },
+    [userId, history, reviews, progressIndex, progressMode]
+  );
+
+  // --- 合言葉ログイン ---
+  const handleLogin = (e) => {
+    e?.preventDefault();
+    const id = inputId.trim();
+    if (!id) return;
+    setUserId(id);
+    setScreen("dashboard");
+    console.log("[Login] 合言葉でログイン:", id);
   };
 
-  const toggleReviewFlag = (questionId) => {
-    const newReview = { ...userData.review };
-    newReview[questionId] = !newReview[questionId];
-    setUserData(prev => ({ ...prev, review: newReview }));
-    
-    // 即時保存
-    saveUserDataToFirebase(userData.history, newReview, currentIndex, playMode);
+  // --- モードに応じた問題リストを構築 ---
+  const buildList = useCallback(
+    (m) => {
+      if (m === "wrong") {
+        return QUESTIONS.filter((q) => history?.[q.id] && history[q.id].correct === false);
+      }
+      if (m === "review") {
+        return QUESTIONS.filter((q) => reviews?.[q.id] === true);
+      }
+      return QUESTIONS;
+    },
+    [history, reviews]
+  );
+
+  // --- クイズ開始 ---
+  const startQuiz = (m, startIndex = 0) => {
+    const list = buildList(m);
+    if (list.length === 0) {
+      alert(
+        m === "wrong"
+          ? "前回不正解の問題はありません。"
+          : m === "review"
+          ? "要復習に登録された問題はありません。"
+          : "問題がありません。"
+      );
+      return;
+    }
+    const safeIndex = Math.min(startIndex, list.length - 1);
+    setMode(m);
+    setQuizList(list);
+    setCurrentIndex(safeIndex);
+    setSelected(null);
+    setIsAnswered(false);
+    setScreen("quiz");
+    console.log("[Quiz] 出題開始", { mode: m, startIndex: safeIndex, count: list.length });
   };
 
-  const returnToMenu = () => {
-    // 戻る際に現在のインデックスを保存
-    saveUserDataToFirebase(userData.history, userData.review, currentIndex, playMode);
-    setCurrentScreen('menu');
+  // --- 途中再開 ---
+  const handleResume = () => {
+    const p = pendingProgress;
+    setShowResumeModal(false);
+    if (!p) return;
+    console.log("[Resume] 続きから再開", { mode: p.progressMode, index: p.progressIndex });
+    startQuiz(p.progressMode || "all", p.progressIndex || 0);
   };
 
-  // ------------------------------------------
-  // UI コンポーネント
-  // ------------------------------------------
+  const handleRestart = () => {
+    setShowResumeModal(false);
+    setProgressIndex(0);
+    persist({ progressIndex: 0 });
+    console.log("[Resume] 進捗をリセットして最初から");
+  };
 
-  if (isLoading) {
+  // --- 解答 ---
+  const handleAnswer = (choiceIdx) => {
+    if (isAnswered) return;
+    const q = quizList[currentIndex];
+    if (!q) return;
+    const correct = choiceIdx === q.answer;
+    setSelected(choiceIdx);
+    setIsAnswered(true);
+
+    const newHistory = {
+      ...history,
+      [q.id]: { correct, answeredAt: new Date().toISOString() },
+    };
+    setHistory(newHistory);
+    // 現在の進捗位置とモードを保存（正解・不正解を問わず）
+    persist({ history: newHistory, progressIndex: currentIndex, progressMode: mode });
+    console.log("[Answer] 解答保存", { id: q.id, correct, progressIndex: currentIndex });
+  };
+
+  // --- 要復習トグル ---
+  const toggleReview = () => {
+    const q = quizList[currentIndex];
+    if (!q) return;
+    const cur = reviews?.[q.id] === true;
+    const newReviews = { ...reviews, [q.id]: !cur };
+    if (!newReviews[q.id]) delete newReviews[q.id];
+    setReviews(newReviews);
+    persist({ reviews: newReviews });
+    console.log("[Review] 要復習トグル", { id: q.id, value: !cur });
+  };
+
+  // --- 次の問題へ ---
+  const handleNext = () => {
+    const nextIdx = currentIndex + 1;
+    if (nextIdx >= quizList.length) {
+      // 全問完走 → progressIndex を 0 にリセット
+      setProgressIndex(0);
+      persist({ progressIndex: 0 });
+      setScreen("result");
+      console.log("[Quiz] 全問完走。progressIndexを0にリセット");
+      return;
+    }
+    setCurrentIndex(nextIdx);
+    setSelected(null);
+    setIsAnswered(false);
+    persist({ progressIndex: nextIdx, progressMode: mode });
+    console.log("[Quiz] 次の問題へ", nextIdx);
+  };
+
+  // --- ホームに戻る（その時点の進捗を即書き込み） ---
+  const goHome = () => {
+    if (screen === "quiz") {
+      persist({ progressIndex: currentIndex, progressMode: mode });
+      console.log("[Nav] ホームへ。進捗を保存", currentIndex);
+    }
+    setSelected(null);
+    setIsAnswered(false);
+    setScreen("dashboard");
+  };
+
+  // ===== レンダリング =====
+
+  // 初期ローディング（Auth完了まで真っ白を防ぐ）
+  if (!authReady) {
     return (
-      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
-        <div className="text-xl font-bold text-gray-600 animate-pulse">Loading Data...</div>
-      </div>
-    );
-  }
-
-  if (!isLoggedIn) {
-    return (
-      <div className="min-h-screen bg-gray-50 flex flex-col items-center justify-center p-4">
-        <div className="bg-white p-8 rounded-xl shadow-lg max-w-md w-full">
-          <div className="flex items-center justify-center mb-6 text-blue-600">
-            <BookOpen size={48} />
-          </div>
-          <h1 className="text-2xl font-bold text-center text-gray-800 mb-2">システム開発 過去問演習</h1>
-          <p className="text-sm text-gray-500 text-center mb-6">合言葉を入力して学習データを同期しましょう</p>
-          
-          <form onSubmit={handleLogin} className="space-y-4">
-            <div>
-              <input
-                type="text"
-                value={userId}
-                onChange={(e) => setUserId(e.target.value)}
-                placeholder="合言葉 (例: my-secret-key)"
-                className="w-full px-4 py-3 rounded-lg border focus:ring-2 focus:ring-blue-500 outline-none"
-                required
-              />
-            </div>
-            <button
-              type="submit"
-              className="w-full bg-blue-600 text-white font-bold py-3 rounded-lg hover:bg-blue-700 transition"
-            >
-              学習をスタート
-            </button>
-          </form>
-        </div>
+      <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center text-slate-300">
+        <RefreshCw className="animate-spin text-indigo-400 mb-4" size={40} />
+        <p className="text-sm tracking-wide">Loading...</p>
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen bg-gray-100 pb-12">
-      {/* ヘッダー */}
-      <header className="bg-white shadow-sm sticky top-0 z-10">
-        <div className="max-w-4xl mx-auto px-4 py-3 flex justify-between items-center">
-          <h1 className="text-lg font-bold text-gray-800 flex items-center">
-            <BookOpen className="mr-2 text-blue-600" size={20} />
-            システム開発過去問
-          </h1>
-          <div className="flex items-center gap-4">
-            <span className="text-sm text-gray-500 hidden md:block">ID: {userId}</span>
-            <button 
-              onClick={() => { setIsLoggedIn(false); setUserId(''); }}
-              className="text-gray-500 hover:text-red-500 flex items-center text-sm"
-            >
-              <LogOut size={16} className="mr-1" />
-              ログアウト
-            </button>
+    <div className="min-h-screen bg-slate-950 text-slate-100 font-sans">
+      <div className="mx-auto max-w-3xl px-4 py-6">
+        {screen === "login" && (
+          <LoginScreen inputId={inputId} setInputId={setInputId} onSubmit={handleLogin} />
+        )}
+
+        {screen === "dashboard" && (
+          <Dashboard
+            userId={userId}
+            history={history}
+            reviews={reviews}
+            onStart={startQuiz}
+            onLogout={() => {
+              setUserId("");
+              setHistory({});
+              setReviews({});
+              setProgressIndex(0);
+              setScreen("login");
+            }}
+          />
+        )}
+
+        {screen === "quiz" && quizList[currentIndex] && (
+          <QuizScreen
+            q={quizList[currentIndex]}
+            index={currentIndex}
+            total={quizList.length}
+            selected={selected}
+            isAnswered={isAnswered}
+            onAnswer={handleAnswer}
+            onNext={handleNext}
+            onHome={goHome}
+            isReview={reviews?.[quizList[currentIndex].id] === true}
+            onToggleReview={toggleReview}
+          />
+        )}
+
+        {screen === "result" && (
+          <ResultScreen
+            quizList={quizList}
+            history={history}
+            onHome={goHome}
+            onRetry={() => startQuiz(mode, 0)}
+          />
+        )}
+      </div>
+
+      {/* 途中再開モーダル */}
+      {showResumeModal && pendingProgress && (
+        <ResumeModal
+          progress={pendingProgress}
+          onResume={handleResume}
+          onRestart={handleRestart}
+        />
+      )}
+    </div>
+  );
+}
+
+// ===================================================================
+// 画面：ログイン（合言葉）
+// ===================================================================
+function LoginScreen({ inputId, setInputId, onSubmit }) {
+  return (
+    <div className="flex min-h-[80vh] flex-col items-center justify-center">
+      <div className="w-full max-w-md rounded-2xl border border-slate-800 bg-slate-900/60 p-8 shadow-2xl backdrop-blur">
+        <div className="mb-6 text-center">
+          <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-br from-indigo-600 to-sky-500 shadow-lg shadow-indigo-900/40">
+            <BookOpen className="text-white" size={28} />
           </div>
+          <h1 className="text-xl font-bold text-white">{APP_TITLE}</h1>
+          <p className="mt-1 text-sm text-indigo-300">{SOURCE_LABEL}</p>
         </div>
-      </header>
 
-      <main className="max-w-4xl mx-auto px-4 mt-6">
-        {/* ========================================== */}
-        {/* メニュー画面 */}
-        {/* ========================================== */}
-        {currentScreen === 'menu' && (
-          <div className="space-y-6">
-            
-            {/* 途中再開UI */}
-            {resumeData.progressIndex > 0 && (
-              <div className="bg-blue-50 border border-blue-200 rounded-xl p-6 shadow-sm">
-                <div className="flex items-start">
-                  <Clock className="text-blue-500 mt-1 mr-3 flex-shrink-0" size={24} />
-                  <div>
-                    <h2 className="text-lg font-bold text-blue-800 mb-1">学習の続きから再開できます</h2>
-                    <p className="text-sm text-blue-600 mb-4">
-                      前回は「{resumeData.progressMode === 'all' ? 'すべての問題' : resumeData.progressMode === 'wrong' ? '前回不正解のみ' : '要復習のみ'}」の 
-                      <span className="font-bold text-lg"> 第{resumeData.progressIndex + 1}問目 </span>
-                      まで進んでいます。
-                    </p>
-                    <div className="flex flex-wrap gap-3">
-                      <button 
-                        onClick={() => startQuiz(resumeData.progressMode, true)}
-                        className="bg-blue-600 text-white px-5 py-2 rounded-lg font-medium hover:bg-blue-700 flex items-center"
-                      >
-                        <Play size={16} className="mr-2" />
-                        続きから再開する
-                      </button>
-                      <button 
-                        onClick={() => saveUserDataToFirebase(userData.history, userData.review, 0, 'all').then(() => setResumeData({progressIndex: 0, progressMode: 'all'}))}
-                        className="bg-white text-blue-600 border border-blue-300 px-5 py-2 rounded-lg font-medium hover:bg-blue-50 flex items-center"
-                      >
-                        <RotateCcw size={16} className="mr-2" />
-                        進捗をリセット
-                      </button>
-                    </div>
-                  </div>
+        <form onSubmit={onSubmit}>
+          <label className="mb-2 flex items-center gap-2 text-sm font-medium text-slate-300">
+            <User size={16} /> 合言葉（ユーザーID）
+          </label>
+          <input
+            type="text"
+            value={inputId}
+            onChange={(e) => setInputId(e.target.value)}
+            placeholder="例: my-study-key-2026"
+            className="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-3 text-sm text-white placeholder-slate-500 outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/30"
+          />
+          <p className="mt-2 text-xs text-slate-500">
+            同じ合言葉を入力すれば、PCとスマホで学習履歴・進捗が同期されます。
+          </p>
+          <button
+            type="submit"
+            disabled={!inputId.trim()}
+            className="mt-6 flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-indigo-600 to-sky-500 px-4 py-3 text-sm font-bold text-white shadow-lg shadow-indigo-900/40 transition hover:scale-[1.01] hover:shadow-indigo-700/50 disabled:opacity-40 disabled:hover:scale-100"
+          >
+            学習を始める <ArrowRight size={16} />
+          </button>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+// ===================================================================
+// 画面：ダッシュボード
+// ===================================================================
+function Dashboard({ userId, history, reviews, onStart, onLogout }) {
+  const answered = QUESTIONS.filter((q) => history?.[q.id]).length;
+  const correct = QUESTIONS.filter((q) => history?.[q.id]?.correct === true).length;
+  const wrong = QUESTIONS.filter((q) => history?.[q.id]?.correct === false).length;
+  const notYet = TOTAL - answered;
+  const reviewCount = QUESTIONS.filter((q) => reviews?.[q.id] === true).length;
+
+  const accuracy = answered > 0 ? Math.round((correct / answered) * 100) : 0;
+
+  const chartData = [
+    { name: "正解", value: correct, fill: "#34d399" },
+    { name: "不正解", value: wrong, fill: "#fb7185" },
+    { name: "未着手", value: notYet, fill: "#64748b" },
+  ];
+
+  return (
+    <div>
+      {/* ヘッダー */}
+      <div className="mb-6 flex items-center justify-between">
+        <div>
+          <h1 className="text-lg font-bold text-white">{APP_TITLE}</h1>
+          <p className="text-xs text-indigo-300">{SOURCE_LABEL}</p>
+        </div>
+        <button
+          onClick={onLogout}
+          className="flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs text-slate-300 transition hover:border-slate-600"
+        >
+          <User size={14} /> {userId}
+        </button>
+      </div>
+
+      {/* 統計カード */}
+      <div className="mb-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <StatCard label="進捗" value={`${answered}/${TOTAL}`} accent="indigo" />
+        <StatCard label="正答率" value={`${accuracy}%`} accent="sky" />
+        <StatCard label="不正解" value={wrong} accent="rose" />
+        <StatCard label="要復習" value={reviewCount} accent="amber" />
+      </div>
+
+      {/* 解答状況グラフ */}
+      <div className="mb-6 rounded-2xl border border-slate-800 bg-slate-900/60 p-4">
+        <h2 className="mb-2 flex items-center gap-2 text-sm font-bold text-slate-200">
+          <BarChart2 size={16} className="text-sky-400" /> 解答状況（正解・不正解・未着手）
+        </h2>
+        <div className="h-52 w-full">
+          <ResponsiveContainer width="100%" height="100%">
+            <BarChart data={chartData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+              <XAxis dataKey="name" tick={{ fill: "#94a3b8", fontSize: 12 }} axisLine={{ stroke: "#334155" }} tickLine={false} />
+              <YAxis allowDecimals={false} tick={{ fill: "#64748b", fontSize: 11 }} axisLine={false} tickLine={false} />
+              <Tooltip
+                cursor={{ fill: "rgba(99,102,241,0.1)" }}
+                contentStyle={{ background: "#0f172a", border: "1px solid #334155", borderRadius: 12, color: "#e2e8f0", fontSize: 12 }}
+              />
+              <Bar dataKey="value" radius={[6, 6, 0, 0]}>
+                {chartData.map((d, i) => (
+                  <Cell key={i} fill={d.fill} />
+                ))}
+              </Bar>
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+      </div>
+
+      {/* モード選択 */}
+      <div className="mb-6 space-y-3">
+        <ModeButton
+          icon={<BookOpen size={18} />}
+          title="すべての問題"
+          desc={`全${TOTAL}問を順番に演習`}
+          onClick={() => onStart("all", 0)}
+        />
+        <ModeButton
+          icon={<RefreshCw size={18} />}
+          title="前回不正解の問題のみ"
+          desc={`${wrong}問が対象`}
+          onClick={() => onStart("wrong", 0)}
+          disabled={wrong === 0}
+        />
+        <ModeButton
+          icon={<HelpCircle size={18} />}
+          title="要復習の問題のみ"
+          desc={`${reviewCount}問が対象`}
+          onClick={() => onStart("review", 0)}
+          disabled={reviewCount === 0}
+        />
+      </div>
+
+      {/* 履歴一覧（グリッド俯瞰） */}
+      <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-4">
+        <h2 className="mb-3 flex items-center gap-2 text-sm font-bold text-slate-200">
+          <BarChart2 size={16} className="text-indigo-400" /> 解答状況一覧
+        </h2>
+        <div className="grid grid-cols-1 gap-2">
+          {QUESTIONS.map((q) => {
+            const h = history?.[q.id];
+            const st = !h ? "未着手" : h.correct ? "正解" : "不正解";
+            const stColor = !h
+              ? "text-slate-500 border-slate-700"
+              : h.correct
+              ? "text-emerald-300 border-emerald-700/50 bg-emerald-500/10"
+              : "text-rose-300 border-rose-700/50 bg-rose-500/10";
+            const dt = h?.answeredAt
+              ? new Date(h.answeredAt).toLocaleString("ja-JP", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })
+              : "-";
+            return (
+              <div
+                key={q.id}
+                className="flex items-center gap-3 rounded-lg border border-slate-800 bg-slate-950/50 px-3 py-2"
+              >
+                <span className="w-6 shrink-0 text-center text-xs font-bold text-slate-400">{q.id}</span>
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-xs font-medium text-slate-200">{q.title}</p>
+                  <p className="truncate text-[10px] text-slate-500">{CAT_LABEL[q.category]}・{q.source}</p>
                 </div>
+                {reviews?.[q.id] && (
+                  <span className="shrink-0 rounded border border-amber-600/50 bg-amber-500/10 px-1.5 py-0.5 text-[10px] text-amber-300">復習</span>
+                )}
+                <span className={`shrink-0 rounded border px-2 py-0.5 text-[10px] font-bold ${stColor}`}>{st}</span>
+                <span className="hidden shrink-0 text-[10px] text-slate-500 sm:block">{dt}</span>
               </div>
-            )}
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <button 
-                onClick={() => startQuiz('all')}
-                className="bg-white p-6 rounded-xl shadow-sm hover:shadow-md transition flex flex-col items-center border border-gray-100 group"
-              >
-                <div className="bg-green-100 p-4 rounded-full mb-3 group-hover:bg-green-200 transition">
-                  <BookOpen size={32} className="text-green-600" />
-                </div>
-                <h3 className="font-bold text-gray-800 text-lg">すべての問題</h3>
-                <p className="text-sm text-gray-500 mt-1">全18問を順番に出題します</p>
-              </button>
+function StatCard({ label, value, accent }) {
+  const colors = {
+    indigo: "from-indigo-600/20 to-indigo-500/5 border-indigo-700/40 text-indigo-200",
+    sky: "from-sky-600/20 to-sky-500/5 border-sky-700/40 text-sky-200",
+    rose: "from-rose-600/20 to-rose-500/5 border-rose-700/40 text-rose-200",
+    amber: "from-amber-600/20 to-amber-500/5 border-amber-700/40 text-amber-200",
+  };
+  return (
+    <div className={`rounded-xl border bg-gradient-to-br p-3 ${colors[accent]}`}>
+      <p className="text-[11px] opacity-80">{label}</p>
+      <p className="mt-1 text-xl font-bold text-white">{value}</p>
+    </div>
+  );
+}
 
-              <button 
-                onClick={() => startQuiz('wrong')}
-                className="bg-white p-6 rounded-xl shadow-sm hover:shadow-md transition flex flex-col items-center border border-gray-100 group"
+function ModeButton({ icon, title, desc, onClick, disabled }) {
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      className="group flex w-full items-center gap-4 rounded-2xl border border-slate-800 bg-slate-900/60 px-5 py-4 text-left transition hover:scale-[1.01] hover:border-indigo-600/60 hover:shadow-lg hover:shadow-indigo-900/30 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:scale-100 disabled:hover:border-slate-800"
+    >
+      <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-indigo-600 to-sky-500 text-white shadow-md">
+        {icon}
+      </div>
+      <div className="flex-1">
+        <p className="font-bold text-white">{title}</p>
+        <p className="text-xs text-slate-400">{desc}</p>
+      </div>
+      <ChevronRight className="text-slate-600 transition group-hover:translate-x-1 group-hover:text-indigo-400" size={20} />
+    </button>
+  );
+}
+
+// ===================================================================
+// 画面：出題・解答・解説
+// ===================================================================
+function QuizScreen({ q, index, total, selected, isAnswered, onAnswer, onNext, onHome, isReview, onToggleReview }) {
+  const correct = isAnswered && selected === q.answer;
+
+  return (
+    <div>
+      {/* 上部バー */}
+      <div className="mb-4 flex items-center justify-between">
+        <button
+          onClick={onHome}
+          className="flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs text-slate-300 transition hover:border-slate-600"
+        >
+          <Home size={14} /> ホーム
+        </button>
+        <span className="text-xs text-slate-400">
+          {index + 1} / {total} 問
+        </span>
+      </div>
+
+      {/* 進捗バー */}
+      <div className="mb-5 h-1.5 w-full overflow-hidden rounded-full bg-slate-800">
+        <div
+          className="h-full rounded-full bg-gradient-to-r from-indigo-500 to-sky-400 transition-all"
+          style={{ width: `${((index + 1) / total) * 100}%` }}
+        />
+      </div>
+
+      {/* 問題カード */}
+      <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-5 shadow-xl">
+        <div className="mb-3 flex flex-wrap items-center gap-2">
+          <span className="rounded-lg bg-gradient-to-r from-indigo-600 to-sky-500 px-2.5 py-1 text-[11px] font-bold text-white">
+            {SECTION_BADGE}
+          </span>
+          <span className="rounded-lg border border-sky-600/50 bg-sky-500/10 px-2.5 py-1 text-[11px] font-bold text-sky-200">
+            {q.source}
+          </span>
+          <span className="rounded-lg border border-slate-700 bg-slate-950 px-2.5 py-1 text-[11px] text-slate-300">
+            問題 {q.id}：{q.title}
+          </span>
+        </div>
+
+        <p className="whitespace-pre-wrap text-sm leading-relaxed text-slate-100">{q.question}</p>
+
+        {/* 問題画面の図表（解答漏洩しない与条件のみ） */}
+        {renderFigures(q.id, "problem")}
+
+        {/* 選択肢 */}
+        <div className="mt-4 space-y-2.5">
+          {q.choices.map((c, i) => {
+            let cls =
+              "border-slate-700 bg-slate-950/60 hover:border-indigo-600/60 hover:bg-slate-900";
+            if (isAnswered) {
+              if (i === q.answer) {
+                cls = "border-emerald-500/70 bg-emerald-500/10";
+              } else if (i === selected) {
+                cls = "border-rose-500/70 bg-rose-500/10";
+              } else {
+                cls = "border-slate-800 bg-slate-950/40 opacity-60";
+              }
+            }
+            return (
+              <button
+                key={i}
+                onClick={() => onAnswer(i)}
+                disabled={isAnswered}
+                className={`flex w-full items-start gap-3 rounded-xl border px-4 py-3 text-left text-sm transition ${cls} ${
+                  !isAnswered ? "hover:scale-[1.005]" : "cursor-default"
+                }`}
               >
-                <div className="bg-red-100 p-4 rounded-full mb-3 group-hover:bg-red-200 transition">
-                  <X size={32} className="text-red-600" />
-                </div>
-                <h3 className="font-bold text-gray-800 text-lg">前回不正解のみ</h3>
-                <p className="text-sm text-gray-500 mt-1">苦手な問題を重点的に学習</p>
-                <span className="mt-2 text-xs font-bold text-red-500 bg-red-50 px-2 py-1 rounded">
-                  該当: {quizData.filter(q => userData.history[q.id]?.correct === false).length}問
+                <span
+                  className={`mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-xs font-bold ${
+                    isAnswered && i === q.answer
+                      ? "bg-emerald-500 text-white"
+                      : isAnswered && i === selected
+                      ? "bg-rose-500 text-white"
+                      : "bg-slate-800 text-slate-300"
+                  }`}
+                >
+                  {CHOICE_LABELS[i]}
                 </span>
+                <span className="flex-1 text-slate-100">{c}</span>
+                {isAnswered && i === q.answer && <Check size={18} className="mt-0.5 shrink-0 text-emerald-400" />}
+                {isAnswered && i === selected && i !== q.answer && <X size={18} className="mt-0.5 shrink-0 text-rose-400" />}
               </button>
+            );
+          })}
+        </div>
+      </div>
 
-              <button 
-                onClick={() => startQuiz('review')}
-                className="bg-white p-6 rounded-xl shadow-sm hover:shadow-md transition flex flex-col items-center border border-gray-100 group"
-              >
-                <div className="bg-yellow-100 p-4 rounded-full mb-3 group-hover:bg-yellow-200 transition">
-                  <AlertCircle size={32} className="text-yellow-600" />
-                </div>
-                <h3 className="font-bold text-gray-800 text-lg">要復習のみ</h3>
-                <p className="text-sm text-gray-500 mt-1">自分でチェックした問題を復習</p>
-                <span className="mt-2 text-xs font-bold text-yellow-600 bg-yellow-50 px-2 py-1 rounded">
-                  該当: {quizData.filter(q => userData.review[q.id] === true).length}問
-                </span>
-              </button>
-
-              <button 
-                onClick={() => setCurrentScreen('history')}
-                className="bg-white p-6 rounded-xl shadow-sm hover:shadow-md transition flex flex-col items-center border border-gray-100 group"
-              >
-                <div className="bg-purple-100 p-4 rounded-full mb-3 group-hover:bg-purple-200 transition">
-                  <BarChart2 size={32} className="text-purple-600" />
-                </div>
-                <h3 className="font-bold text-gray-800 text-lg">学習履歴</h3>
-                <p className="text-sm text-gray-500 mt-1">正答状況の一覧を確認</p>
-              </button>
-            </div>
+      {/* 解説エリア */}
+      {isAnswered && (
+        <div className="mt-5 rounded-2xl border border-slate-800 bg-slate-900/60 p-5 shadow-xl">
+          <div
+            className={`mb-3 flex items-center gap-2 rounded-xl px-4 py-2.5 text-sm font-bold ${
+              correct
+                ? "bg-emerald-500/15 text-emerald-300"
+                : "bg-rose-500/15 text-rose-300"
+            }`}
+          >
+            {correct ? <Check size={18} /> : <X size={18} />}
+            {correct ? "正解！" : "不正解"}
+            <span className="ml-auto text-slate-300">
+              正解：{CHOICE_LABELS[q.answer]}
+            </span>
           </div>
-        )}
 
-        {/* ========================================== */}
-        {/* クイズ画面 */}
-        {/* ========================================== */}
-        {currentScreen === 'quiz' && filteredQuestions.length > 0 && (
-          <div className="max-w-3xl mx-auto space-y-6">
-            
-            {/* プログレスバー & ヘッダー */}
-            <div className="flex items-center justify-between bg-white p-3 rounded-lg shadow-sm">
-              <button 
-                onClick={returnToMenu}
-                className="text-gray-500 hover:bg-gray-100 p-2 rounded-lg flex items-center transition"
-              >
-                <Home size={18} className="mr-1" />
-                <span className="text-sm font-medium">中断して戻る</span>
-              </button>
-              <div className="text-sm font-bold text-gray-600">
-                {currentIndex + 1} / {filteredQuestions.length}
-              </div>
-            </div>
+          {/* 要復習チェック */}
+          <label className="mb-4 flex cursor-pointer select-none items-center gap-2 rounded-xl border border-slate-700 bg-slate-950/50 px-4 py-3 text-sm text-slate-200 transition hover:border-amber-600/50">
+            <input
+              type="checkbox"
+              checked={isReview}
+              onChange={onToggleReview}
+              className="h-4 w-4 accent-amber-500"
+            />
+            <HelpCircle size={16} className="text-amber-400" />
+            要復習リストに登録する
+          </label>
 
-            {/* 問題カード */}
-            <div className="bg-white rounded-xl shadow-sm overflow-hidden border border-gray-200">
-              <div className="bg-blue-50 px-6 py-4 border-b border-blue-100 flex justify-between items-start">
-                <div>
-                  <span className="inline-block bg-blue-600 text-white text-xs font-bold px-2 py-1 rounded mb-2">
-                    {filteredQuestions[currentIndex].year}
-                  </span>
-                  <h2 className="text-lg font-bold text-gray-800">
-                    {filteredQuestions[currentIndex].title}
-                  </h2>
-                </div>
-              </div>
-              <div className="p-6">
-                <p className="text-gray-700 leading-relaxed mb-6 whitespace-pre-wrap">
-                  {filteredQuestions[currentIndex].question}
-                </p>
+          {/* 解説用の図表（解答後にのみ表示） */}
+          {renderFigures(q.id, "explanation")}
 
-                <div className="space-y-3">
-                  {filteredQuestions[currentIndex].options.map((opt, idx) => {
-                    // クラスの判定ロジック
-                    let btnClass = "w-full text-left p-4 rounded-lg border-2 transition-all flex items-start group ";
-                    if (!showExplanation) {
-                      btnClass += "border-gray-200 hover:border-blue-400 hover:bg-blue-50";
-                    } else {
-                      if (idx === filteredQuestions[currentIndex].answerIndex) {
-                        btnClass += "border-green-500 bg-green-50"; // 正解の選択肢
-                      } else if (idx === selectedOption) {
-                        btnClass += "border-red-500 bg-red-50"; // 選んだ不正解の選択肢
-                      } else {
-                        btnClass += "border-gray-100 opacity-50"; // その他
-                      }
-                    }
+          <h3 className="mb-2 flex items-center gap-2 text-sm font-bold text-sky-300">
+            <BookOpen size={16} /> 解説
+          </h3>
+          <p className="whitespace-pre-wrap text-sm leading-relaxed text-slate-200">{q.explanation}</p>
 
-                    return (
-                      <button
-                        key={idx}
-                        disabled={showExplanation}
-                        onClick={() => handleAnswerClick(idx)}
-                        className={btnClass}
-                      >
-                        <span className="font-bold text-gray-500 mr-3 mt-0.5">
-                          {["ア", "イ", "ウ", "エ", "オ"][idx]}
-                        </span>
-                        <span className="text-gray-700 text-sm leading-relaxed">{opt}</span>
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-            </div>
+          <button
+            onClick={onNext}
+            className="mt-5 flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-indigo-600 to-sky-500 px-4 py-3 text-sm font-bold text-white shadow-lg shadow-indigo-900/40 transition hover:scale-[1.01]"
+          >
+            {index + 1 >= total ? "結果を見る" : "次の問題へ"} <ArrowRight size={16} />
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
 
-            {/* 解説エリア */}
-            {showExplanation && (
-              <div className="bg-white rounded-xl shadow-sm border border-gray-200 animate-fade-in overflow-hidden">
-                <div className={`px-6 py-4 border-b flex items-center ${selectedOption === filteredQuestions[currentIndex].answerIndex ? 'bg-green-100 border-green-200 text-green-800' : 'bg-red-100 border-red-200 text-red-800'}`}>
-                  {selectedOption === filteredQuestions[currentIndex].answerIndex ? (
-                    <><Check className="mr-2" /> <span className="font-bold text-lg">正解！</span></>
-                  ) : (
-                    <><X className="mr-2" /> <span className="font-bold text-lg">不正解</span></>
-                  )}
-                </div>
-                <div className="p-6">
-                  <div className="bg-gray-50 p-4 rounded-lg text-gray-700 text-sm leading-relaxed whitespace-pre-wrap mb-6">
-                    {filteredQuestions[currentIndex].explanation}
-                  </div>
-                  
-                  <div className="flex flex-col sm:flex-row items-center justify-between gap-4 pt-4 border-t">
-                    <label className="flex items-center cursor-pointer group">
-                      <input 
-                        type="checkbox" 
-                        className="w-5 h-5 text-blue-600 border-gray-300 rounded focus:ring-blue-500 cursor-pointer"
-                        checked={userData.review[filteredQuestions[currentIndex].id] || false}
-                        onChange={() => toggleReviewFlag(filteredQuestions[currentIndex].id)}
-                      />
-                      <span className="ml-2 font-medium text-gray-700 group-hover:text-gray-900 transition">
-                        要復習リストに追加する
-                      </span>
-                    </label>
+// ===================================================================
+// 画面：結果
+// ===================================================================
+function ResultScreen({ quizList, history, onHome, onRetry }) {
+  const total = quizList.length;
+  const correct = quizList.filter((q) => history?.[q.id]?.correct === true).length;
+  const rate = total > 0 ? Math.round((correct / total) * 100) : 0;
 
-                    <button
-                      onClick={handleNextQuestion}
-                      className="w-full sm:w-auto bg-blue-600 text-white font-bold py-3 px-8 rounded-lg hover:bg-blue-700 transition flex items-center justify-center"
-                    >
-                      {currentIndex === filteredQuestions.length - 1 ? '完了する' : '次の問題へ'}
-                      <ChevronRight className="ml-1" size={20} />
-                    </button>
-                  </div>
-                </div>
-              </div>
-            )}
-          </div>
-        )}
+  return (
+    <div className="flex min-h-[80vh] flex-col items-center justify-center">
+      <div className="w-full max-w-md rounded-2xl border border-slate-800 bg-slate-900/60 p-8 text-center shadow-2xl">
+        <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-gradient-to-br from-indigo-600 to-sky-500 shadow-lg">
+          <Check className="text-white" size={32} />
+        </div>
+        <h1 className="text-xl font-bold text-white">演習完了！</h1>
+        <p className="mt-1 text-sm text-slate-400">お疲れさまでした。</p>
 
-        {/* ========================================== */}
-        {/* 履歴画面 */}
-        {/* ========================================== */}
-        {currentScreen === 'history' && (
-          <div className="space-y-6">
-            <div className="flex items-center justify-between">
-              <button 
-                onClick={() => setCurrentScreen('menu')}
-                className="bg-white border border-gray-300 text-gray-700 px-4 py-2 rounded-lg hover:bg-gray-50 flex items-center transition"
-              >
-                <Home size={18} className="mr-2" /> メニューへ戻る
-              </button>
-              <h2 className="text-xl font-bold text-gray-800">学習履歴</h2>
-            </div>
+        <div className="my-6 rounded-2xl border border-slate-800 bg-slate-950/60 p-6">
+          <p className="text-sm text-slate-400">正答数</p>
+          <p className="mt-1 text-4xl font-bold text-white">
+            {correct}
+            <span className="text-lg text-slate-500"> / {total}</span>
+          </p>
+          <p className="mt-2 text-2xl font-bold text-sky-300">{rate}%</p>
+        </div>
 
-            <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-              <div className="overflow-x-auto">
-                <table className="w-full text-left text-sm text-gray-600">
-                  <thead className="bg-gray-50 text-gray-700 border-b">
-                    <tr>
-                      <th className="px-6 py-4 font-bold">問題番号</th>
-                      <th className="px-6 py-4 font-bold">出題年度</th>
-                      <th className="px-6 py-4 font-bold">前回の正誤</th>
-                      <th className="px-6 py-4 font-bold">要復習</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-gray-100">
-                    {quizData.map((q, i) => {
-                      const hist = userData.history[q.id];
-                      const isReview = userData.review[q.id];
-                      return (
-                        <tr key={q.id} className="hover:bg-gray-50 transition">
-                          <td className="px-6 py-4 font-medium text-gray-900">第{i + 1}問</td>
-                          <td className="px-6 py-4">{q.year}</td>
-                          <td className="px-6 py-4">
-                            {!hist ? (
-                              <span className="text-gray-400">-</span>
-                            ) : hist.correct ? (
-                              <span className="inline-flex items-center text-green-600 font-bold bg-green-50 px-2 py-1 rounded">
-                                <Check size={14} className="mr-1" /> 正解
-                              </span>
-                            ) : (
-                              <span className="inline-flex items-center text-red-600 font-bold bg-red-50 px-2 py-1 rounded">
-                                <X size={14} className="mr-1" /> 不正解
-                              </span>
-                            )}
-                          </td>
-                          <td className="px-6 py-4">
-                            <label className="flex items-center cursor-pointer">
-                              <input 
-                                type="checkbox" 
-                                className="w-5 h-5 text-yellow-500 border-gray-300 rounded focus:ring-yellow-500"
-                                checked={isReview || false}
-                                onChange={() => toggleReviewFlag(q.id)}
-                              />
-                            </label>
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          </div>
-        )}
+        <div className="space-y-3">
+          <button
+            onClick={onRetry}
+            className="flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-indigo-600 to-sky-500 px-4 py-3 text-sm font-bold text-white shadow-lg transition hover:scale-[1.01]"
+          >
+            <RefreshCw size={16} /> もう一度挑戦する
+          </button>
+          <button
+            onClick={onHome}
+            className="flex w-full items-center justify-center gap-2 rounded-xl border border-slate-700 bg-slate-900 px-4 py-3 text-sm font-medium text-slate-200 transition hover:border-slate-600"
+          >
+            <Home size={16} /> ホームに戻る
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
-      </main>
-      
-      {/* 簡単なCSSアニメーション */}
-      <style dangerouslySetInnerHTML={{__html: `
-        @keyframes fadeIn {
-          from { opacity: 0; transform: translateY(10px); }
-          to { opacity: 1; transform: translateY(0); }
-        }
-        .animate-fade-in {
-          animation: fadeIn 0.3s ease-out forwards;
-        }
-      `}} />
+// ===================================================================
+// 途中再開モーダル
+// ===================================================================
+function ResumeModal({ progress, onResume, onRestart }) {
+  const modeLabel =
+    progress.progressMode === "wrong"
+      ? "前回不正解"
+      : progress.progressMode === "review"
+      ? "要復習"
+      : "すべての問題";
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm">
+      <div className="w-full max-w-sm rounded-2xl border border-slate-700 bg-slate-900 p-6 shadow-2xl">
+        <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-xl bg-gradient-to-br from-indigo-600 to-sky-500">
+          <RefreshCw className="text-white" size={24} />
+        </div>
+        <h2 className="text-center text-lg font-bold text-white">中断した続きがあります</h2>
+        <p className="mt-3 text-center text-sm leading-relaxed text-slate-300">
+          前回は【問題{(progress.progressIndex || 0) + 1}】まで進んでいます。
+          <br />
+          中断したモード（<span className="font-bold text-sky-300">{modeLabel}</span>モード）の続きから再開しますか？
+        </p>
+        <div className="mt-6 space-y-3">
+          <button
+            onClick={onResume}
+            className="flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-indigo-600 to-sky-500 px-4 py-3 text-sm font-bold text-white shadow-lg transition hover:scale-[1.01]"
+          >
+            続きから再開する <ArrowRight size={16} />
+          </button>
+          <button
+            onClick={onRestart}
+            className="flex w-full items-center justify-center gap-2 rounded-xl border border-slate-700 bg-slate-950 px-4 py-3 text-sm font-medium text-slate-200 transition hover:border-slate-600"
+          >
+            最初から始める
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
